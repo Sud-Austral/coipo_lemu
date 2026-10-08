@@ -3,7 +3,8 @@
 Se consultan todos los poligonos con uso «Bosques» de la comuna en la capa
 regional CIREN (CONAF), simplificados (maxAllowableOffset ~20 m) y sin
 atributos extra. Cache en memoria y en disco (datos_cache/) por 7 dias; se
-precargan al arrancar en segundo plano.
+precargan al arrancar en segundo plano. Para dibujar los poligonos con cambio
+se pide aparte su geometria exacta (geometrias_exactas).
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ MIN_HA_DEFECTO = 1.0  # bajo 1 ha el promedio a 20 m tiene muy pocos pixeles
 OUT_FIELDS = "objectid,uso,subuso,superf_ha,nom_com"
 
 _cache: dict[str, tuple[float, dict]] = {}
+_exactas: dict[str, tuple[float, dict[int, dict]]] = {}  # region -> (cargado_en, objectid -> geometria)
 _locks: dict[str, asyncio.Lock] = {}
 _tareas: dict[str, asyncio.Task] = {}
 
@@ -144,6 +146,60 @@ def precargar_zonas(region: str, config: dict) -> None:
             pass
 
     _tareas[region] = asyncio.create_task(_correr())
+
+
+def _archivo_exactas(region: str, layer_id: int) -> Path:
+    return CACHE_DIR / f"zonas_{region}_capa{layer_id}_exactas.json"
+
+
+async def geometrias_exactas(region: str, config: dict, ids: list[int]) -> dict[int, dict]:
+    """Geometria sin generalizar de los poligonos pedidos, solo para dibujar.
+
+    La simplificada (cargar_zonas) es la que va a GEE; ArcGIS la simplifica
+    poligono por poligono, asi que los bordes vecinos se cruzan o dejan
+    huecos. Para los poligonos con cambio se pide la exacta por objectid y se
+    cachea (memoria + disco, 7 dias, por objectid). Los ids que CIREN no
+    entregue quedan fuera del resultado (el llamador usa la simplificada).
+    """
+    layer_id = config["ciren_layer"]
+    guardado = _exactas.get(region)
+    if not guardado or time.time() - guardado[0] >= CACHE_TTL_S:
+        ruta = _archivo_exactas(region, layer_id)
+        try:
+            carga = json.loads(ruta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            carga = {}
+        if time.time() - (carga.get("cargado_en") or 0) >= CACHE_TTL_S:
+            carga = {"cargado_en": time.time(), "geometrias": {}}
+        guardado = (carga["cargado_en"], {int(k): v for k, v in carga["geometrias"].items()})
+        _exactas[region] = guardado
+    cargado_en, geometrias = guardado
+    faltan = [i for i in dict.fromkeys(ids) if i not in geometrias]
+    if faltan:
+        lock = _locks.setdefault(f"{region}|exactas", asyncio.Lock())
+        async with lock:
+            faltan = [i for i in faltan if i not in geometrias]
+            nuevas = {}
+            if faltan:
+                try:
+                    nuevas = await ciren.query_por_ids(layer_id, faltan)
+                except ciren.CirenError:
+                    nuevas = {}
+            for zid, g in nuevas.items():
+                limpia = limpiar_geometria(g)
+                if limpia:
+                    geometrias[zid] = limpia
+            if nuevas:
+                try:
+                    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    ruta = _archivo_exactas(region, layer_id)
+                    tmp = ruta.with_suffix(".tmp")
+                    tmp.write_text(json.dumps({"cargado_en": cargado_en, "geometrias": geometrias}, separators=(",", ":")),
+                                   encoding="utf-8")
+                    tmp.replace(ruta)
+                except OSError:
+                    pass
+    return {i: geometrias[i] for i in ids if i in geometrias}
 
 
 def filtrar(zonas: list[dict], min_ha: float) -> list[dict]:

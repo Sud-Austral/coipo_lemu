@@ -87,6 +87,10 @@ def test_estado_listado_sin_rol_por_cercania():
 CUADRADO = {"type": "Polygon", "coordinates": [[[-72.2, -39.7], [-72.19, -39.7], [-72.19, -39.69], [-72.2, -39.69], [-72.2, -39.7]]]}
 
 
+EXACTA = {"type": "Polygon", "coordinates": [[[-72.2, -39.7], [-72.195, -39.7001], [-72.19, -39.7], [-72.19, -39.69],
+                                             [-72.2, -39.69], [-72.2, -39.7]]]}
+
+
 def _zona(zid, ha=5.0, lon=-72.195):
     return {"id": zid, "uso": "Bosques", "subuso": "Bosque Nativo", "superf_ha": ha,
             "centroide": {"lat": -39.695, "lon": lon}, "geometry": CUADRADO}
@@ -108,7 +112,11 @@ def orq(monkeypatch):
     async def fake_zonas(region, config):
         return {"capa": 12, "anio": 2024, "zonas": [_zona(1), _zona(2), _zona(3), _zona(4, ha=0.4)]}
 
+    async def fake_exactas(region, config, ids):
+        return {1: EXACTA} if 1 in ids else {}  # el 3 queda con la simplificada
+
     monkeypatch.setattr(zonas_ciren, "cargar_zonas", fake_zonas)
+    monkeypatch.setattr(zonas_ciren, "geometrias_exactas", fake_exactas)
     monkeypatch.setattr(ficha_punto, "precargar_saff", lambda comuna: None)
     monkeypatch.setattr(ficha_punto, "indice_rol_en_cache", lambda comuna: {})
     monkeypatch.setattr(predios_ciren, "precargar_predios", lambda region, config: None)
@@ -152,6 +160,8 @@ async def test_deteccion_poligonos_en_lotes_y_estado_saff(orq, monkeypatch):
     assert r["poligonos"][0]["predio"]["rol"] == "209-58"
     assert "geometry" not in r["poligonos"][0]["predio"]
     assert r["imagenes"] == {"t0": 2, "t1": 3}
+    assert r["poligonos"][0]["geometry"] == EXACTA and r["poligonos"][0]["geometria"] == "exacta"
+    assert r["poligonos"][1]["geometry"] == CUADRADO and r["poligonos"][1]["geometria"] == "simplificada"
 
     # Plan aprobado (antes de t1) con el mismo rol -> en_regla ya en el listado.
     plan = {"Nro.Solicitud": "77/14/2025", "Rol Avaluo": "00209-00058", "Comuna_Predio": "Panguipulli",
@@ -244,3 +254,51 @@ async def test_zonas_ciren_cache_disco_y_filtro(monkeypatch, tmp_path):
     await zonas_ciren.cargar_zonas("panguipulli", cfg)  # desde disco
     assert len(llamadas) == 1
     zonas_ciren._cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_geometrias_exactas_cache_y_falla(monkeypatch, tmp_path):
+    from app.clientes import ciren
+    from app.logica import zonas_ciren
+
+    pedidos = []
+
+    async def fake_ids(layer_id, ids, **kw):
+        pedidos.append(list(ids))
+        if 99 in ids:
+            raise ciren.CirenError("ciren_geometria_exacta")
+        return {i: EXACTA for i in ids}
+
+    monkeypatch.setattr(ciren, "query_por_ids", fake_ids)
+    monkeypatch.setattr(zonas_ciren, "CACHE_DIR", tmp_path)
+    zonas_ciren._exactas.clear()
+    cfg = {"ciren_layer": 12}
+    assert await zonas_ciren.geometrias_exactas("panguipulli", cfg, [5, 6]) == {5: EXACTA, 6: EXACTA}
+    assert (tmp_path / "zonas_panguipulli_capa12_exactas.json").exists()
+    zonas_ciren._exactas.clear()
+    # Desde disco: solo se pide el que falta.
+    assert set(await zonas_ciren.geometrias_exactas("panguipulli", cfg, [5, 6, 7])) == {5, 6, 7}
+    assert pedidos == [[5, 6], [7]]
+    # CIREN caido: sin geometria exacta para ese id (el orquestador usa la simplificada).
+    assert await zonas_ciren.geometrias_exactas("panguipulli", cfg, [5, 99]) == {5: EXACTA}
+    zonas_ciren._exactas.clear()
+
+
+@pytest.mark.asyncio
+async def test_query_por_ids_lotes_de_200(monkeypatch):
+    from app.clientes import ciren
+
+    wheres = []
+
+    async def fake_get(client, url, params):
+        wheres.append(params["where"])
+        assert "maxAllowableOffset" not in params and params["geometryPrecision"] == 6
+        ids = [int(x) for x in params["where"][len("objectid IN ("):-1].split(",")]
+        if 450 in ids:
+            raise ciren.CirenError("ciren_error_500")
+        return {"features": [{"properties": {"objectid": i}, "geometry": CUADRADO} for i in ids]}
+
+    monkeypatch.setattr(ciren, "_get_json", fake_get)
+    r = await ciren.query_por_ids(12, list(range(1, 501)))
+    assert len(wheres) == 3
+    assert len(r) == 400 and 450 not in r and 1 in r  # el lote caido se omite

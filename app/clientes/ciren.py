@@ -192,6 +192,53 @@ async def query_poligonos(
     return features
 
 
+async def query_por_ids(
+    layer_id: int,
+    ids: list[int],
+    geometry_precision: int = 6,
+    concurrencia: int = 3,
+    timeout_s: float = 60.0,
+    base_url: str = CIREN_BASE_URL,
+    por_lote: int = 200,
+) -> dict[int, dict]:
+    """Geometria sin generalizar (GeoJSON 4326) de los objectid pedidos.
+
+    Lotes de `objectid IN (...)` de <= por_lote, sin maxAllowableOffset. Un
+    lote que falla se omite (sus ids no vienen en la respuesta); solo lanza
+    CirenError si fallan todos.
+    """
+    lotes = [ids[i:i + por_lote] for i in range(0, len(ids), por_lote)]
+    if not lotes:
+        return {}
+    url = f"{base_url}/{layer_id}/query"
+    sem = asyncio.Semaphore(concurrencia)
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+
+        async def lote(grupo: list[int]) -> list[dict] | None:
+            params = {
+                "where": f"objectid IN ({','.join(str(int(i)) for i in grupo)})",
+                "outFields": "objectid",
+                "outSR": "4326",
+                "geometryPrecision": geometry_precision,
+                "f": "geojson",
+            }
+            async with sem:
+                try:
+                    data = await _get_json(client, url, params)
+                except CirenError:
+                    return None
+            return data.get("features") or []
+
+        respuestas = await asyncio.gather(*(lote(g) for g in lotes))
+    if all(r is None for r in respuestas):
+        raise CirenError("ciren_geometria_exacta")
+    return {
+        f["properties"]["objectid"]: f["geometry"]
+        for r in respuestas if r for f in r
+        if (f.get("properties") or {}).get("objectid") is not None and f.get("geometry")
+    }
+
+
 async def query_predio_punto(layer_id: int, lon: float, lat: float, geometria: bool = True) -> dict | None:
     """Predio CIREN (GeoJSON 4326) que contiene el punto, o None."""
     params = {

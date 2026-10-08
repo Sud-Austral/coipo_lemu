@@ -25,6 +25,20 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
   NDVI cacheado 6 h por (region, t0, t1, cloud, min_ha); 2 min si fallo GEE.
   Solo se listan los poligonos con cambio (delta mas negativo primero); los
   demas solo se cuentan.
+- Geometria para dibujar: la simplificada (~20 m) es solo para GEE; ArcGIS
+  simplifica cada poligono por separado y los bordes vecinos se cruzan (en un
+  racimo de 40 poligonos: 35 pares traslapados). Para los poligonos con cambio
+  `zonas_ciren.geometrias_exactas` pide la exacta a CIREN (`objectid IN`,
+  lotes de 200, `geometryPrecision=6`, sin `maxAllowableOffset`), cache en
+  memoria y `datos_cache/zonas_<region>_capa<N>_exactas.json` 7 dias (~8 KB
+  por poligono). Si CIREN no la entrega: la simplificada con
+  `geometria: 'simplificada'`.
+- Estilo del mapa (`web/app.js`): relleno 20 % (35 % en hover), borde con halo
+  oscuro, colores de mapa alerta `#e5484d`, revisar/sin datos `#f5b400`, en
+  regla `#30a46c`; seleccionado borde blanco 3,5 px y el resto al 60 %; predio
+  blanco discontinuo; rodales cian sin relleno; punto en el centroide si el
+  poligono mide < 3 px (zoom < 12). Al mostrar resultados el raster CIREN baja
+  a 30 % salvo que el usuario haya tocado la capa.
 - Zonas CIREN (`logica/zonas_ciren.py`): consulta paginada (maxRecordCount del
   servicio, `maxAllowableOffset=0.0002`, `geometryPrecision=5`), cache en
   memoria y en `datos_cache/` (gitignore) por 7 dias, precarga al arrancar.

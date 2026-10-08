@@ -9,6 +9,9 @@
    planes SAFF ya cargados en memoria: por rol y, de respaldo, por cercania
    (lista_negra.evaluar). El cruce con rodales SIGCRA se hace al abrir la
    ficha del poligono.
+4. Para dibujar, los poligonos con cambio llevan su geometria exacta CIREN
+   (zonas_ciren.geometrias_exactas); si CIREN no la entrega, la simplificada
+   con `geometria: 'simplificada'`.
 
 El NDVI se cachea 6 h por (region, t0, t1, cloud, min_ha); predio y estado
 SAFF se recalculan en cada respuesta (es barato) para recoger las cargas
@@ -130,9 +133,23 @@ async def _calcular(t: Trabajo, config: dict) -> None:
                 imagenes[k] = max(imagenes[k], (resp.get("images") or {}).get(k) or 0)
             for it in resp.get("items") or []:
                 valores[it.get("id")] = (it.get("ndvi_t0"), it.get("ndvi_t1"))
+        # Geometria exacta solo para dibujar los poligonos con cambio (la
+        # simplificada de GEE deja bordes vecinos cruzados y esquinas en punta).
+        con_cambio = [
+            zid for zid, (n0, n1) in valores.items()
+            if (d := cambio_vegetacion.delta(n0, n1)) is not None and cambio_vegetacion.hay_cambio(d)
+        ]
+        exactas = {}
+        if con_cambio:
+            t.fase = "Descargando contornos exactos CIREN"
+            try:
+                exactas = await zonas_ciren.geometrias_exactas(t.region, config, con_cambio)
+            except Exception:  # noqa: BLE001 - sin contorno exacto se dibuja la simplificada
+                exactas = {}
         t.ndvi = {
             "zonas": zonas,
             "valores": valores,
+            "exactas": exactas,
             "errores": errores,
             "lotes": len(lotes),
             "imagenes": imagenes,
@@ -213,6 +230,7 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
             for p in rol.planes_del_predio(indice_rol or {}, predio if predio["estado"] == "ok" else None)
         ]
         ev = lista_negra.evaluar(puntos is not None, predio, planes_rol, cercanos or 0, RADIO_PLANES_KM)
+        exacta = n.get("exactas", {}).get(z["id"])
         con_cambio.append({
             "id": z["id"],
             "uso": z.get("uso"),
@@ -227,7 +245,8 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
             "planes_cercanos": cercanos,
             "predio": predio,
             "planes_rol": len(planes_rol) if puntos is not None else None,
-            "geometry": z["geometry"],
+            "geometry": exacta or z["geometry"],
+            "geometria": "exacta" if exacta else "simplificada",
         })
     con_cambio.sort(key=lambda p: p["delta"])
 

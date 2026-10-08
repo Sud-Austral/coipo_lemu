@@ -91,8 +91,25 @@ maplibregl.addProtocol('bing', async (params, abort) => {
   return { data: await resp.arrayBuffer() };
 });
 
+// Colores del mapa: más luminosos que los de la lista para leerse sobre bosque oscuro.
 const COLOR_ESTADO = ['match', ['get', 'estado'],
-  'alerta', '#c0392b', 'en_regla', '#0b6b3a', 'revisar', '#d4a017', 'sin_datos', '#d4a017', '#5d6b62'];
+  'alerta', '#e5484d', 'en_regla', '#30a46c', 'revisar', '#f5b400', 'sin_datos', '#b8c2bc', '#8b9a90'];
+// Orden de dibujo por gravedad: en bordes compartidos gana la alerta.
+const ORDEN_ESTADO = ['match', ['get', 'estado'], 'alerta', 3, 'revisar', 2, 'en_regla', 1, 0];
+const HALO = 'rgba(0,0,0,0.55)';
+const LINEA_REDONDA = { 'line-join': 'round', 'line-cap': 'round' };
+const ANCHO_BORDE = ['interpolate', ['linear'], ['zoom'], 9, 1, 13, 2, 16, 3];
+const ANCHO_HALO = ['interpolate', ['linear'], ['zoom'], 9, 3, 13, 4, 16, 5];
+const RELLENO = ['case', ['boolean', ['feature-state', 'hover'], false], 0.35, 0.2];
+const SIN_SEL = ['==', ['get', 'i'], -1];
+// Punto en el centroide solo si el polígono mide < 3 px: `px11` es su tamaño a
+// zoom 11 y cada nivel menos lo reduce a la mitad (capa visible hasta zoom 12).
+const chicoA = (px) => ['case', ['<', ['get', 'px11'], px], 1, 0];
+// `f` atenúa (polígono no seleccionado): zoom solo puede ir en el step de afuera.
+const puntoVisible = (f = 1) => {
+  const v = (px) => ['*', chicoA(px), f];
+  return ['step', ['zoom'], v(48), 8, v(24), 9, v(12), 10, v(6), 11, v(3)];
+};
 
 // Vista compartible: #zoom/lat/lon (hash de MapLibre) y ?base=sat|bing|google|osm.
 let vistaEnUrl = /^#\d/.test(window.location.hash);
@@ -132,6 +149,7 @@ const map = new maplibregl.Map({
         tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
       },
       cambios: { type: 'geojson', data: VACIO },
+      'cambios-centros': { type: 'geojson', data: VACIO },
       rodales: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       predio: { type: 'geojson', data: VACIO },
       referencias: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
@@ -141,24 +159,34 @@ const map = new maplibregl.Map({
       { id: 'base-bing', type: 'raster', source: 'bing', layout: { visibility: 'none' } },
       { id: 'base-google', type: 'raster', source: 'google' },
       { id: 'base-osm', type: 'raster', source: 'osm', layout: { visibility: 'none' } },
-      // Wayback se inserta aquí (antes de 'tope-base'); NDVI y CIREN antes de 'tope-capas'.
+      // Wayback se inserta aquí (antes de 'tope-base'); NDVI, CIREN y predios antes de 'tope-capas'.
+      // Encima: rodales, predio, cambios (relleno, halo, borde), selección, referencias y rótulos.
       { id: 'tope-base', type: 'background', paint: { 'background-opacity': 0 } },
       { id: 'tope-capas', type: 'background', paint: { 'background-opacity': 0 } },
-      { id: 'rotulos', type: 'raster', source: 'rotulos' },
-      { id: 'cambios-relleno', type: 'fill', source: 'cambios', paint: { 'fill-color': COLOR_ESTADO, 'fill-opacity': 0.35 } },
-      { id: 'cambios-borde', type: 'line', source: 'cambios', paint: { 'line-color': COLOR_ESTADO, 'line-width': ['interpolate', ['linear'], ['zoom'], 9, 1, 15, 2.5] } },
+      { id: 'rodales-borde', type: 'line', source: 'rodales', layout: LINEA_REDONDA, paint: { 'line-color': '#3dd6f5', 'line-width': 1.5 } },
+      { id: 'predio-halo', type: 'line', source: 'predio', layout: LINEA_REDONDA, paint: { 'line-color': HALO, 'line-width': 4 } },
+      { id: 'predio-borde', type: 'line', source: 'predio', paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-dasharray': [3, 2] } },
+      { id: 'cambios-relleno', type: 'fill', source: 'cambios', paint: { 'fill-color': COLOR_ESTADO, 'fill-opacity': RELLENO } },
+      { id: 'cambios-halo', type: 'line', source: 'cambios', layout: { ...LINEA_REDONDA, 'line-sort-key': ORDEN_ESTADO }, paint: { 'line-color': HALO, 'line-width': ANCHO_HALO } },
+      { id: 'cambios-borde', type: 'line', source: 'cambios', layout: { ...LINEA_REDONDA, 'line-sort-key': ORDEN_ESTADO }, paint: { 'line-color': COLOR_ESTADO, 'line-width': ANCHO_BORDE } },
       {
-        id: 'cambios-sel', type: 'line', source: 'cambios', filter: ['==', ['get', 'i'], -1],
-        paint: { 'line-color': '#ffffff', 'line-width': 4, 'line-dasharray': [2, 1] },
+        id: 'cambios-puntos', type: 'circle', source: 'cambios-centros', maxzoom: 12,
+        paint: {
+          'circle-color': COLOR_ESTADO,
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 3, 11, 5],
+          'circle-stroke-color': HALO,
+          'circle-stroke-width': 1,
+          'circle-opacity': puntoVisible(),
+          'circle-stroke-opacity': puntoVisible(),
+        },
       },
-      { id: 'predio-halo', type: 'line', source: 'predio', paint: { 'line-color': '#000000', 'line-width': 5, 'line-opacity': 0.45 } },
-      { id: 'predio-borde', type: 'line', source: 'predio', paint: { 'line-color': '#ffdd00', 'line-width': 2.5 } },
-      { id: 'rodales-relleno', type: 'fill', source: 'rodales', paint: { 'fill-color': '#7fdc9a', 'fill-opacity': 0.15 } },
-      { id: 'rodales-borde', type: 'line', source: 'rodales', paint: { 'line-color': '#7fdc9a', 'line-width': 2 } },
+      { id: 'cambios-sel-halo', type: 'line', source: 'cambios', filter: SIN_SEL, layout: LINEA_REDONDA, paint: { 'line-color': HALO, 'line-width': 5.5 } },
+      { id: 'cambios-sel', type: 'line', source: 'cambios', filter: SIN_SEL, layout: LINEA_REDONDA, paint: { 'line-color': '#ffffff', 'line-width': 3.5 } },
       {
         id: 'referencias', type: 'circle', source: 'referencias',
         paint: { 'circle-radius': 5, 'circle-color': '#ffffff', 'circle-stroke-color': '#0b6b3a', 'circle-stroke-width': 2 },
       },
+      { id: 'rotulos', type: 'raster', source: 'rotulos' },
     ],
   },
 });
@@ -206,10 +234,24 @@ function ponerCapaCiren(layerId) {
   }, map.getLayer('predios') ? 'predios' : 'tope-capas');
 }
 
+// Al mostrar resultados el raster CIREN baja a 30 % para no competir con los
+// polígonos, salvo que el usuario ya haya ajustado la capa.
+let cirenTocado = false;
+
+function atenuarCiren() {
+  // Sus colores de uso (granate, oliva, verde) se confunden con los de estado:
+  // se apaga al mostrar resultados, salvo que el usuario ya la haya ajustado.
+  if (cirenTocado) return;
+  $('ciren-on').checked = false;
+  if (map.getLayer('ciren')) map.setLayoutProperty('ciren', 'visibility', 'none');
+}
+
 $('ciren-on').addEventListener('change', () => {
+  cirenTocado = true;
   if (map.getLayer('ciren')) map.setLayoutProperty('ciren', 'visibility', $('ciren-on').checked ? 'visible' : 'none');
 });
 $('ciren-opacidad').addEventListener('input', () => {
+  cirenTocado = true;
   $('ciren-opacidad-val').textContent = `${$('ciren-opacidad').value} %`;
   if (map.getLayer('ciren')) map.setPaintProperty('ciren', 'raster-opacity', cirenOpacidad());
 });
@@ -321,7 +363,7 @@ map.on('click', async (ev) => {
   const conCiren = $('ciren-on').checked;
   const conPredios = $('predios-on').checked;
   if (Date.now() < ignorarClickHasta || (!conCiren && !conPredios) || !estado.region) return;
-  if (map.queryRenderedFeatures(ev.point, { layers: ['referencias', 'cambios-relleno'] }).length) return;
+  if (map.queryRenderedFeatures(ev.point, { layers: ['referencias', 'cambios-relleno', 'cambios-puntos'] }).length) return;
   const { lng, lat } = ev.lngLat;
   const popup = new maplibregl.Popup({ maxWidth: '300px' }).setLngLat(ev.lngLat).setHTML('<span class="muted">Consultando CIREN…</span>').addTo(map);
   const partes = await Promise.all([
@@ -449,12 +491,54 @@ function f3(v) {
 function geojsonCambios() {
   return {
     type: 'FeatureCollection',
-    features: estado.resultados.map((r, i) => ({ type: 'Feature', geometry: r.geometry, properties: { i, id: r.id, estado: estadoDe(r) } })),
+    features: estado.resultados.map((r, i) => ({ type: 'Feature', id: i, geometry: r.geometry, properties: { i, id: r.id, estado: estadoDe(r) } })),
   };
 }
 
+// Tamaño en px a zoom 11 (lado mayor de la caja; el mundo mide 512 px a zoom 0).
+function px11(r) {
+  const b = cajaGeometria(r.geometry);
+  const cos = Math.cos((r.centroide.lat * Math.PI) / 180);
+  const m = Math.max((b.getEast() - b.getWest()) * 111320 * cos, (b.getNorth() - b.getSouth()) * 110540);
+  return m / ((40075016 * cos) / 512 / 2048);
+}
+
+function geojsonCentros() {
+  return {
+    type: 'FeatureCollection',
+    features: estado.resultados.map((r, i) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [r.centroide.lon, r.centroide.lat] },
+      properties: { i, estado: estadoDe(r), px11: px11(r) },
+    })),
+  };
+}
+
+let hoverCambio = null;
+
 function pintarCambiosMapa() {
-  if (map.getSource('cambios')) map.getSource('cambios').setData(geojsonCambios());
+  if (!map.getSource('cambios')) return;
+  hoverCambio = null;
+  map.removeFeatureState({ source: 'cambios' });
+  map.getSource('cambios').setData(geojsonCambios());
+  map.getSource('cambios-centros').setData(geojsonCentros());
+}
+
+function mostrarCambiosMapa() {
+  pintarCambiosMapa();
+  if (estado.resultados.length) atenuarCiren();
+}
+
+// Con un polígono seleccionado: borde blanco en él y el resto al 60 %.
+function marcarSeleccion() {
+  const i = estado.sel ?? -1;
+  const filtro = ['==', ['get', 'i'], i];
+  map.setFilter('cambios-sel', filtro);
+  map.setFilter('cambios-sel-halo', filtro);
+  const atenuar = i < 0 ? 1 : ['case', ['==', ['get', 'i'], i], 1, 0.6];
+  map.setPaintProperty('cambios-relleno', 'fill-opacity', i < 0 ? RELLENO : ['*', RELLENO, atenuar]);
+  ['cambios-halo', 'cambios-borde'].forEach((l) => map.setPaintProperty(l, 'line-opacity', atenuar));
+  ['circle-opacity', 'circle-stroke-opacity'].forEach((prop) => map.setPaintProperty('cambios-puntos', prop, puntoVisible(atenuar)));
 }
 
 function rolTarjeta(r) {
@@ -566,7 +650,7 @@ async function detectar(ev) {
     $('resumen-texto').textContent = textoResumen(data);
     actualizarConteos();
     $('resumen').hidden = false;
-    pintarCambiosMapa();
+    mostrarCambiosMapa();
     if (data.estado === 'sin_datos') {
       lista.innerHTML = `<p class="msg">${esc(data.mensaje || SIN_DATOS)}</p>`;
       return;
@@ -585,19 +669,31 @@ async function detectar(ev) {
 
 $('form-controles').addEventListener('submit', detectar);
 
-map.on('click', 'cambios-relleno', (ev) => {
-  ignorarClickHasta = Date.now() + 400;
-  const i = ev.features[0].properties.i;
-  if (Number.isInteger(i)) seleccionar(i);
+['cambios-relleno', 'cambios-puntos'].forEach((capa) => {
+  map.on('click', capa, (ev) => {
+    if (Date.now() < ignorarClickHasta) return;  // punto y relleno en el mismo clic
+    ignorarClickHasta = Date.now() + 400;
+    const i = ev.features[0].properties.i;
+    if (Number.isInteger(i)) seleccionar(i);
+  });
+  map.on('mouseenter', capa, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', capa, () => { map.getCanvas().style.cursor = ''; });
 });
-map.on('mouseenter', 'cambios-relleno', () => { map.getCanvas().style.cursor = 'pointer'; });
-map.on('mouseleave', 'cambios-relleno', () => { map.getCanvas().style.cursor = ''; });
+
+function hoverEn(i) {
+  if (hoverCambio === i) return;
+  if (hoverCambio !== null) map.setFeatureState({ source: 'cambios', id: hoverCambio }, { hover: false });
+  hoverCambio = i;
+  if (i !== null) map.setFeatureState({ source: 'cambios', id: i }, { hover: true });
+}
+map.on('mousemove', 'cambios-relleno', (ev) => hoverEn(ev.features[0].id ?? null));
+map.on('mouseleave', 'cambios-relleno', () => hoverEn(null));
 
 /* ---------- selección y ficha ---------- */
 
 function deseleccionar() {
   estado.sel = null;
-  if (map.getLayer('cambios-sel')) map.setFilter('cambios-sel', ['==', ['get', 'i'], -1]);
+  if (map.getLayer('cambios-sel')) marcarSeleccion();
   $('ficha').hidden = true;
   limpiarFichaMapa();
   cerrarWayback();
@@ -622,7 +718,7 @@ function seleccionar(i) {
   document.querySelectorAll('.punto').forEach((el) => el.classList.toggle('sel', Number(el.dataset.i) === i));
   const tarjeta = document.querySelector(`.punto[data-i="${i}"]`);
   if (tarjeta) tarjeta.scrollIntoView({ block: 'nearest' });
-  map.setFilter('cambios-sel', ['==', ['get', 'i'], i]);
+  marcarSeleccion();
   cerrarWayback();
   map.fitBounds(cajaGeometria(r.geometry), { padding: 60, maxZoom: 17 });
   cargarFicha(i);
@@ -729,7 +825,7 @@ async function cargarFicha(i) {
     ${avisos.map((a) => `<p class="aviso">${esc(a)}</p>`).join('')}
     <p class="chico muted">Estado del cambio: <span class="chip ${esc(estadoDe(r))}">${esc(infoEstado(estadoDe(r)).etq)}</span>${r.motivo ? ` ${esc(r.motivo)}` : ''}</p>
     <p class="chico muted">${esc(r.subuso || r.uso || 'Bosque')} · ${ha(r.superf_ha)} · NDVI ${f3(r.ndvi_t0)} → ${f3(r.ndvi_t1)} (Δ ${f3(r.delta)}).
-      Centroide ${r.centroide.lat.toFixed(5)}, ${r.centroide.lon.toFixed(5)}: el cruce con rodales se evalúa en ese punto.</p>
+      Centroide ${r.centroide.lat.toFixed(5)}, ${r.centroide.lon.toFixed(5)}: el cruce con rodales se evalúa en ese punto.${r.geometria === 'simplificada' ? ' Contorno simplificado (CIREN no entregó el exacto).' : ''}</p>
     ${rolNorm && f.saff?.estado === 'ok' ? `<h3 class="sub">Planes SAFF del rol ${esc(rolNorm)} (${planesRol.length})</h3>
       ${planesRol.length ? `<div class="planes">${planesRol.map(tarjetaPlan).join('')}</div>` : '<p class="chico muted">Ningún plan SAFF con este rol en los últimos 10 años.</p>'}` : ''}
     ${f.saff?.estado === 'ok' ? `<h3 class="sub">Planes cercanos a 3 km (${(f.planes || []).length})</h3>` : ''}
