@@ -67,7 +67,10 @@ async def deteccion(
     region: str = Query(..., description="Region, ver /api/v1/regiones"),
     t0: date = Query(..., description="Fecha inicial de comparacion (YYYY-MM-DD)"),
     t1: date = Query(..., description="Fecha final de comparacion (YYYY-MM-DD)"),
-    cloud: int = Query(40, ge=0, le=100, description="Porcentaje maximo de nubes aceptado"),
+    cloud: int = Query(
+        orquestador.CLOUD_ESCENA_DEFECTO, ge=0, le=100,
+        description="Tope de nubosidad de la escena completa (las nubes se quitan por pixel con Cloud Score+)",
+    ),
     min_ha: float = Query(zonas_ciren.MIN_HA_DEFECTO, ge=0, le=1000, description="Superficie minima del poligono CIREN"),
 ):
     if t0 >= t1:
@@ -93,14 +96,19 @@ async def comparar_sentinel(
     id: int = Query(..., description="objectid del poligono CIREN"),
     t0: date = Query(...),
     t1: date = Query(...),
-    cloud: int = Query(40, ge=0, le=100),
+    cloud: int = Query(orquestador.CLOUD_ESCENA_DEFECTO, ge=0, le=100, description="Tope de nubosidad de la escena completa"),
+    escena_t0: date | None = Query(None, description="Fecha de escena elegida a mano para t0"),
+    escena_t1: date | None = Query(None, description="Fecha de escena elegida a mano para t1"),
 ):
-    """Sentinel-2 color real del poligono en t0 y t1 (ventana +-15/30/60 dias) para el comparador."""
+    """Sentinel-2 color real del poligono en t0 y t1: escena mas limpia sobre el poligono (+-15/30/60 dias)."""
     config = _region(region)
     if t0 >= t1:
         raise HTTPException(status_code=400, detail="t0_debe_ser_anterior_a_t1")
     try:
-        return await comparar.sentinel(region, config, id, t0.isoformat(), t1.isoformat(), cloud)
+        return await comparar.sentinel(
+            region, config, id, t0.isoformat(), t1.isoformat(), cloud,
+            escena_t0.isoformat() if escena_t0 else None, escena_t1.isoformat() if escena_t1 else None,
+        )
     except Exception as exc:  # noqa: BLE001 - el comparador nunca responde 500
         return {"region": region, "id": id, "estado": "sin_datos", "mensaje": "Sin datos por el momento",
                 "error": type(exc).__name__}

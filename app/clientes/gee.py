@@ -23,20 +23,23 @@ async def zonal_ndvi_change(
     t1: tuple[str, str],
     cloud: int = 40,
     scale: int = 20,
+    mascara: str = "cs_plus",
 ) -> dict:
     """NDVI medio por poligono en t0 y t1 (POST /v1/zonal/ndvi-change).
 
     `features` es una FeatureCollection 4326 (max 2500, cada una con
-    properties.id). Devuelve {images:{t0,t1}, scale, items:[{id, ndvi_t0,
-    ndvi_t1, delta}]}. Sin imagenes en algun periodo -> GeeError
-    gee_sin_imagenes.
+    properties.id). Con mascara 'cs_plus' (Cloud Score+ por pixel) devuelve
+    {images:{t0,t1}, scale, items:[{id, ndvi_t0, ndvi_t1, delta,
+    cobertura_t0, cobertura_t1, motivo?}]}; motivo 'nubes' = menos de la
+    mitad del poligono sin nubes en t0 o t1 (ese NDVI viene null). Sin
+    imagenes en algun periodo -> GeeError gee_sin_imagenes.
     """
     url = f"{GEE_BASE_URL}/v1/zonal/ndvi-change"
     body = {
         "features": features,
         "t0_start": t0[0], "t0_end": t0[1],
         "t1_start": t1[0], "t1_end": t1[1],
-        "cloud": cloud, "scale": scale,
+        "cloud": cloud, "scale": scale, "mascara": mascara,
     }
     headers = {"X-API-Key": GEE_API_KEY}
     try:
@@ -114,14 +117,21 @@ async def tiles_ndvi(start: str, end: str, west: float, south: float, east: floa
         raise GeeError("gee_respuesta_invalida") from exc
 
 
-async def tiles_rgb(start: str, end: str, west: float, south: float, east: float, north: float, cloud: int = 40) -> dict:
-    """Teselas Sentinel-2 color real (mediana B4/B3/B2) del bbox (POST /v1/tiles/rgb).
+async def tiles_rgb(start: str, end: str, geometry: dict, cloud: int = 40, fecha_objetivo: str | None = None) -> dict:
+    """Teselas Sentinel-2 color real de la escena mas limpia sobre `geometry` (POST /v1/tiles/rgb).
 
-    Devuelve {tile_url, images, fecha_min, fecha_max, ventana}. Sin escenas
-    en la ventana -> GeeError gee_sin_imagenes.
+    escena 'mas_limpia' + mascara 'cs_plus' + recortar false: la fecha de
+    pasada con menos nubes (Cloud Score+) sobre el poligono, sin recortar la
+    tesela y con los pixeles nublados transparentes. Devuelve {tile_url,
+    images, fecha_escena, nubes_pct, candidatas:[{fecha, nubes_pct}],
+    fecha_min, fecha_max, ventana}. Sin escenas en la ventana -> GeeError
+    gee_sin_imagenes.
     """
     url = f"{GEE_BASE_URL}/v1/tiles/rgb"
-    body = {"start": start, "end": end, "west": west, "south": south, "east": east, "north": north, "cloud": cloud}
+    body = {
+        "geometry": geometry, "start": start, "end": end, "cloud": cloud,
+        "escena": "mas_limpia", "mascara": "cs_plus", "recortar": False, "fecha_objetivo": fecha_objetivo,
+    }
     headers = {"X-API-Key": GEE_API_KEY}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:

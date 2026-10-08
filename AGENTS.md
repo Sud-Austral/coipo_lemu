@@ -25,6 +25,15 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
   NDVI cacheado 6 h por (region, t0, t1, cloud, min_ha); 2 min si fallo GEE.
   Solo se listan los poligonos con cambio (delta mas negativo primero); los
   demas solo se cuentan.
+- Nubes (deteccion): zonal con `mascara:'cs_plus'` (Cloud Score+ por pixel,
+  `cs_cdf >= 0.60`); el tope de nubes de la escena completa (`cloud`, selector
+  «Nubosidad max. escena») pasa a 80 % por defecto
+  (`orquestador.CLOUD_ESCENA_DEFECTO`) porque la limpieza es por pixel. GEE
+  devuelve por poligono `cobertura_t0/t1` (fraccion sin nube); con cobertura
+  < 0,5 en t0 o t1 ese NDVI viene null y `motivo:'nubes'`: el poligono NO se
+  marca con cambio, se cuenta en `resumen.sin_imagen_limpia` («N poligonos sin
+  imagen limpia») y no en `sin_ndvi`. Tarjeta y ficha muestran «Cobertura
+  limpia t0 92 % · t1 81 %».
 - Geometria para dibujar: la simplificada (~20 m) es solo para GEE; ArcGIS
   simplifica cada poligono por separado y los bordes vecinos se cruzan (en un
   racimo de 40 poligonos: 35 pares traslapados). Para los poligonos con cambio
@@ -80,13 +89,26 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
     antigua, marcada «posterior a t0»); DESPUES = la mas cercana a t1 entre las
     posteriores a ANTES (de preferencia >= t0). Si es la misma foto: «No hay foto
     de alta resolucion distinta entre t0 y t1; usa Sentinel-2» con boton.
-  - Sentinel-2 color real: `/api/v1/comparar/sentinel?region&id&t0&t1&cloud`
-    (`logica/comparar.py`) -> per_api_gee `POST /v1/tiles/rgb` con el bbox del
-    poligono CIREN + 1 km; ventana ±15 dias, si no hay escenas ±30 y ±60 (la
-    primera con imagenes). Devuelve por lado `tile_url`, `images`,
-    `fecha_min`/`fecha_max` (rango real de escenas), `ventana`, o `sin_datos`.
-    Cache 30 min (no se cachea un fallo de GEE, que tampoco agranda la ventana).
-    Nunca 500. NDVI: reutiliza `/api/v1/sentinel/tiles`.
+  - Sentinel-2 color real: `/api/v1/comparar/sentinel?region&id&t0&t1&cloud
+    [&escena_t0&escena_t1]` (`logica/comparar.py`) -> per_api_gee `POST
+    /v1/tiles/rgb` con la geometria del poligono CIREN, `escena:'mas_limpia'`,
+    `mascara:'cs_plus'`, `recortar:false` y `fecha_objetivo` = t0 / t1: UNA
+    fecha de pasada (granulos del dia mosaicados), la de menos nubes sobre el
+    poligono; empate -> la mas cercana a la fecha. Ventana ±15, ±30, ±60 dias:
+    se queda con la primera cuya mejor escena tenga <= 10 % de nubes
+    (`NUBES_MAX_PCT`); si ninguna, la mejor de ±60. Por lado: `tile_url`,
+    `fecha_escena`, `nubes_pct`, `limpia`, `candidatas:[{fecha, nubes_pct}]`
+    (max 20, de la ventana usada), `ventana`, `eleccion` automatica|manual, o
+    `sin_datos`. Etiqueta «ANTES · Sentinel-2 · escena 12-07-2026 · 3 % nubes
+    sobre el poligono · +11 d de t0»; selector por lado con las candidatas
+    (fecha · % nubes) -> `escena_t0`/`escena_t1` (se pide solo ese dia; el
+    selector sigue mostrando las candidatas automaticas). Los pixeles nublados
+    residuales son transparentes sobre el fondo oscuro del comparador
+    (`#1b2420`, nunca blanco) con la nota «zonas sin dato por nubes». Cache 30
+    min por (poligono, fecha, cloud) y por (poligono, escena elegida, cloud);
+    un fallo de GEE no se cachea ni agranda la ventana (si ya habia una escena
+    de una ventana menor, se muestra con `incompleto`). Nunca 500. NDVI:
+    reutiliza `/api/v1/sentinel/tiles` (sin mascara de nubes).
 - Bases del mapa: Esri (defecto), Bing (protocolo `bing://` -> quadkey),
   Google (`lyrs=s`) y OSM. Bing y Google solo para comparacion en el piloto
   interno. Vista por URL: `?base=sat|bing|google|osm&ciren=0&predios=1#zoom/lat/lon`.
@@ -103,7 +125,7 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
 
 | Fuente | Uso | Endpoint |
 |---|---|---|
-| per_api_gee | NDVI medio por poligono t0/t1, teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) y Sentinel-2 color real para el comparador (±15/30/60 dias, cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi`, `/v1/tiles/rgb` |
+| per_api_gee | NDVI medio por poligono t0/t1 con mascara Cloud Score+ y cobertura limpia, teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) y Sentinel-2 color real del comparador (escena mas limpia sobre el poligono, ±15/30/60 dias, cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi`, `/v1/tiles/rgb` |
 | CIREN (publico) | Poligonos de bosque de la comuna (zonas de deteccion), capa raster, leyenda, popup por punto | `USOS_DE_LA_TIERRA__CONAF/MapServer` (capa 12 = Los Rios, CONAF 2024) |
 | CIREN / IDE Minagri (publico) | Predios rurales (deslindes SII) de la comuna con rol; capa raster y popup | `IDEMINAGRI/PROPIEDADES_RURALES/MapServer` (capa 11 = Los Rios, CIREN 2018) |
 | per_api_saff | Planes de manejo de los ultimos 10 anios, filtrados por `Comuna_Predio` (cache 6 h por comuna, tramos de 1 anio) | `/v1/historico/pm` |
@@ -151,8 +173,11 @@ o hay `Nro.Resolucion` y `Super.Aprobada` > 0, con `Fec.Resolucion` <= t1
   209-58 · Panguipulli (CIREN 2018)», dibuja el predio, lista primero los
   planes del rol y luego los cercanos, consulta SIGCRA y el front actualiza el
   estado en mapa, lista y conteos.
-- Poligonos sin NDVI en t0 o t1 (nubes, sin imagen, lote de GEE caido) se
-  cuentan como `sin_ndvi`; si fallan todos los lotes la deteccion completa es
+- Poligonos con nubes sobre mas de la mitad del poligono en t0 o t1
+  (`motivo:'nubes'` de GEE) no entran a la regla: se cuentan como
+  `sin_imagen_limpia`. Las nubes bajan el NDVI y darian alertas falsas.
+- Poligonos sin NDVI en t0 o t1 por otra causa (sin imagen, lote de GEE
+  caido) se cuentan como `sin_ndvi`; si fallan todos los lotes la deteccion completa es
   `sin_datos` («Sin datos por el momento»).
 
 ## Pendientes
@@ -179,8 +204,16 @@ o hay `Nro.Resolucion` y `Super.Aprobada` > 0, con `Fec.Resolucion` <= t1
 - `/v1/tiles/rgb` (color real) es nuevo en per_api_gee (version
   2026.10.08.2): desplegarlo antes que esta version de Lemu; revisar en
   produccion si `visualize(min 0, max 3000, gamma 1.3)` deja el bosque legible.
-- El NDVI del comparador usa la ventana [fecha, fecha + 15 dias] y no informa
-  la fecha de cada escena (el endpoint de teselas NDVI no la devuelve).
+- El NDVI del comparador usa la ventana [fecha, fecha + 15 dias], sin mascara
+  de nubes, y no informa la fecha de cada escena (el endpoint de teselas NDVI
+  no la devuelve).
+- Mascara Cloud Score+ y escena mas limpia son nuevas en per_api_gee (version
+  2026.10.08.3): desplegarla antes que Lemu 2026.10.08.7. Validar en
+  produccion: tiempos de `mas_limpia` a ±60 dias (una `reduceRegion` por
+  fecha), cuantos poligonos de Panguipulli quedan en `sin_imagen_limpia` en
+  invierno y si el umbral 0,60 deja bosque en sombra como «nube».
+- Cambiar `cloud` cambia la clave de cache: la deteccion con el nuevo defecto
+  (80) recalcula aunque haya un resultado con 40.
 - Probado en local (Edge headless, poligono CIREN 70150, t0 2025-10-01 / t1
   2026-09-01): Wayback ANTES 26-02-2024 (Maxar 0,31 m) / DESPUES 01-01-2026
   (Vantor 0,31 m); con t0 2026-07-01 ambos lados caen en 01-01-2026 y sale el

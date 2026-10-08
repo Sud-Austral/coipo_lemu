@@ -183,6 +183,35 @@ async def test_deteccion_poligonos_en_lotes_y_estado_saff(orq, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_deteccion_poligono_nublado_no_es_cambio(orq, monkeypatch):
+    from app.clientes import gee
+    from app.logica import ficha_punto
+
+    pedidos = []
+
+    async def fake_zonal(fc, t0, t1, cloud=40, scale=20, mascara="cs_plus"):
+        pedidos.append((cloud, mascara))
+        items = {
+            1: {"id": 1, "ndvi_t0": 0.8, "ndvi_t1": 0.3, "delta": -0.5, "cobertura_t0": 0.97, "cobertura_t1": 0.82},
+            # 2: las nubes bajarian el NDVI, pero GEE lo descarta (cobertura t1 < 0,5)
+            2: {"id": 2, "ndvi_t0": 0.8, "ndvi_t1": None, "delta": None, "cobertura_t0": 0.9, "cobertura_t1": 0.2,
+                "motivo": "nubes"},
+            3: {"id": 3, "ndvi_t0": None, "ndvi_t1": 0.7, "delta": None, "cobertura_t0": None, "cobertura_t1": 1.0},
+        }
+        return {"images": {"t0": 2, "t1": 3}, "scale": 20, "items": [items[f["properties"]["id"]] for f in fc["features"]]}
+
+    monkeypatch.setattr(gee, "zonal_ndvi_change", fake_zonal)
+    monkeypatch.setattr(ficha_punto, "planes_ubicados_en_cache", lambda comuna, centro: [])
+    r = await _esperar(orq, "panguipulli", "2026-07-01", "2026-09-01", 80, 1.0)
+    assert {p for p in pedidos} == {(80, "cs_plus")}
+    s = r["resumen"]
+    assert s["sin_imagen_limpia"] == 1 and s["sin_ndvi"] == 1 and s["con_ndvi"] == 1 and s["con_cambio"] == 1
+    assert [p["id"] for p in r["poligonos"]] == [1]
+    assert r["poligonos"][0]["cobertura_t0"] == 0.97 and r["poligonos"][0]["cobertura_t1"] == 0.82
+    assert r["mascara_nubes"] == "cs_plus"
+
+
+@pytest.mark.asyncio
 async def test_deteccion_gee_caido_es_sin_datos_y_saff_cargando(orq, monkeypatch):
     from app.clientes import gee
     from app.logica import ficha_punto

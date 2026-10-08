@@ -124,6 +124,7 @@ jobs:
           r = d.get('resumen') or {}
           print('Lemu 2.0 deteccion:', 'estado=', d.get('estado'), 'avance=', d.get('avance'),
                 'evaluados=', r.get('poligonos_evaluados'), 'ha=', r.get('ha_evaluadas'), 'con_cambio=', r.get('con_cambio'),
+                'sin_imagen_limpia=', r.get('sin_imagen_limpia'), 'sin_ndvi=', r.get('sin_ndvi'),
                 'alertas=', r.get('alertas'), 'revisar=', r.get('revisar'), 'en_regla=', r.get('en_regla'),
                 'sin_datos=', r.get('sin_datos'), 'predios=', (d.get('predios') or {}).get('predios'))
           PY
@@ -131,7 +132,8 @@ jobs:
       - name: Smoke test comparador Sentinel-2 (antes / despues)
         if: steps.secrets.outputs.pending != 'true'
         run: |
-          # Falla solo en HTTP 5xx; sin imagen o GEE caido es 'sin_datos' por lado. Imprime solo estados.
+          # Falla solo en HTTP 5xx; sin imagen o GEE caido es 'sin_datos' por lado. Imprime estados,
+          # escena elegida, % de nubes sobre el poligono y fechas de las candidatas.
           CODE="$(curl --silent --show-error --max-time 180 -o /tmp/lemu-comparar.json -w '%{http_code}' \
             "http://127.0.0.1:${LEMU_PORT}/api/v1/comparar/sentinel?region=panguipulli&id=70150&t0=2026-07-01&t1=2026-09-01")"
           echo "comparar HTTP $CODE"
@@ -141,7 +143,9 @@ jobs:
           d = json.load(open('/tmp/lemu-comparar.json'))
           def lado(x):
               x = x or {}
-              return {k: x.get(k) for k in ('estado', 'error', 'images', 'fecha_min', 'fecha_max')} | {'dias': (x.get('ventana') or {}).get('dias')}
+              return ({k: x.get(k) for k in ('estado', 'error', 'fecha_escena', 'nubes_pct', 'limpia', 'images')}
+                      | {'dias': (x.get('ventana') or {}).get('dias'),
+                         'candidatas': [f"{c.get('fecha')}:{c.get('nubes_pct')}%" for c in x.get('candidatas') or []]})
           print('Lemu 2.0 comparar:', 'estado=', d.get('estado'), 't0=', lado(d.get('t0')), 't1=', lado(d.get('t1')))
           PY
 

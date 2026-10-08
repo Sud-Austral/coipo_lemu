@@ -24,11 +24,12 @@
     <label class="campo">Fecha t1
       <input type="date" id="t1" value="2026-09-01">
     </label>
-    <label class="campo">Nubosidad máx.
+    <label class="campo" title="Tope de nubes de la escena completa; las nubes sobre cada polígono se quitan píxel a píxel (Cloud Score+)">Nubosidad máx. escena
       <select id="cloud">
         <option value="20">20 %</option>
-        <option value="40" selected>40 %</option>
+        <option value="40">40 %</option>
         <option value="60">60 %</option>
+        <option value="80" selected>80 %</option>
       </select>
     </label>
     <button type="submit" class="btn-primario" id="btn-detectar">Detectar cambios</button>

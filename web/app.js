@@ -57,6 +57,17 @@ function ha(v) {
   return t === '—' ? t : `${t} ha`;
 }
 
+// Fracción 0..1 -> '92 %'
+function pctFraccion(v) {
+  return v === null || v === undefined ? '—' : `${Math.round(Number(v) * 100)} %`;
+}
+
+// Porcentaje de nubes (0..100) -> '3 %' / '< 1 %'
+function pctNubes(v) {
+  if (v === null || v === undefined) return '— %';
+  return v > 0 && v < 1 ? '< 1 %' : `${Math.round(v)} %`;
+}
+
 // 'PANGUIPULLI' -> 'Panguipulli'
 function titulo(v) {
   return String(v ?? '').toLowerCase().replace(/(^|[\s-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
@@ -553,6 +564,12 @@ function rolTarjeta(r) {
   return 'Rol: sin datos';
 }
 
+// Fracción del polígono con píxeles sin nube (Cloud Score+) en cada periodo.
+function textoCobertura(r) {
+  if (r.cobertura_t0 == null && r.cobertura_t1 == null) return '';
+  return `Cobertura limpia t0 ${pctFraccion(r.cobertura_t0)} · t1 ${pctFraccion(r.cobertura_t1)}`;
+}
+
 function tarjetaPoligono(r, i) {
   const e = estadoDe(r);
   const inf = infoEstado(e);
@@ -565,6 +582,7 @@ function tarjetaPoligono(r, i) {
     <span class="n" style="background:${inf.color}">${i + 1}</span>
     <span class="fila"><span class="chip ${esc(e)}">${esc(inf.etq)}</span><b>${esc(r.subuso || r.uso || 'Bosque')}</b><span class="muted">${ha(r.superf_ha)}</span><span class="coords">${rolTarjeta(r)}</span><span class="coords">CIREN ${esc(r.id)}</span></span>
     <span class="fila ndvi">NDVI t0 <b>${f3(r.ndvi_t0)}</b> · t1 <b>${f3(r.ndvi_t1)}</b> · Δ <b style="color:#c0392b">${f3(r.delta)}</b></span>
+    ${textoCobertura(r) ? `<span class="fila coords">${esc(textoCobertura(r))}</span>` : ''}
     <span class="fila motivo">${esc(r.motivo || '')}</span>
     <span class="fila"><button type="button" class="${e === 'alerta' ? 'btn-primario' : 'btn-secundario'} btn-comparar">Comparar antes / después</button></span>`;
   el.addEventListener('click', () => seleccionar(i));
@@ -610,7 +628,9 @@ function textoResumen(d) {
     partes.push(`NDVI Sentinel-2: t0 ${fechaCL(d.ventanas.t0.inicio)} a ${fechaCL(d.ventanas.t0.fin)}, t1 ${fechaCL(d.ventanas.t1.inicio)} a ${fechaCL(d.ventanas.t1.fin)}.`);
   }
   if (s.con_cambio) partes.push(`${s.con_cambio.toLocaleString('es-CL')} con caída de NDVI ≥ 0,15 (${num(s.ha_con_cambio, 0)} ha).`);
-  if (s.sin_ndvi) partes.push(`${s.sin_ndvi.toLocaleString('es-CL')} sin NDVI (nubes, sin imagen o sin respuesta de GEE).`);
+  if (s.sin_imagen_limpia) partes.push(`${s.sin_imagen_limpia.toLocaleString('es-CL')} polígonos sin imagen limpia (nubes sobre más de la mitad del polígono en t0 o t1): no se evalúan.`);
+  if (s.sin_ndvi) partes.push(`${s.sin_ndvi.toLocaleString('es-CL')} sin NDVI (sin imagen o sin respuesta de GEE).`);
+  if (d.mascara_nubes === 'cs_plus') partes.push('Nubes y sombras quitadas píxel a píxel (Cloud Score+).');
   if (d.gee?.estado === 'parcial') partes.push(`per_api_gee no respondió en ${d.gee.lotes_fallidos} de ${d.gee.lotes} lotes.`);
   if (d.saff?.estado !== 'ok') partes.push(`SAFF: ${SIN_DATOS} (se está cargando); los cambios quedan «sin datos».`);
   if (d.predios?.estado !== 'ok') partes.push(`Predios CIREN: ${SIN_DATOS} (se están cargando); sin rol los cambios quedan «sin datos».`);
@@ -849,7 +869,7 @@ async function cargarFicha(i) {
     <div class="conclusion ${claseConclusion(f)}">${esc(f.conclusion)}</div>
     ${avisos.map((a) => `<p class="aviso">${esc(a)}</p>`).join('')}
     <p class="chico muted">Estado del cambio: <span class="chip ${esc(estadoDe(r))}">${esc(infoEstado(estadoDe(r)).etq)}</span>${r.motivo ? ` ${esc(r.motivo)}` : ''}</p>
-    <p class="chico muted">${esc(r.subuso || r.uso || 'Bosque')} · ${ha(r.superf_ha)} · NDVI ${f3(r.ndvi_t0)} → ${f3(r.ndvi_t1)} (Δ ${f3(r.delta)}).
+    <p class="chico muted">${esc(r.subuso || r.uso || 'Bosque')} · ${ha(r.superf_ha)} · NDVI ${f3(r.ndvi_t0)} → ${f3(r.ndvi_t1)} (Δ ${f3(r.delta)}).${textoCobertura(r) ? ` ${esc(textoCobertura(r))} (fracción del polígono sin nubes).` : ''}
       Centroide ${r.centroide.lat.toFixed(5)}, ${r.centroide.lon.toFixed(5)}: el cruce con rodales se evalúa en ese punto.${r.geometria === 'simplificada' ? ' Contorno simplificado (CIREN no entregó el exacto).' : ''}</p>
     ${rolNorm && f.saff?.estado === 'ok' ? `<h3 class="sub">Planes SAFF del rol ${esc(rolNorm)} (${planesRol.length})</h3>
       ${planesRol.length ? `<div class="planes">${planesRol.map(tarjetaPlan).join('')}</div>` : '<p class="chico muted">Ningún plan SAFF con este rol en los últimos 10 años.</p>'}` : ''}
@@ -1062,6 +1082,9 @@ const cmp = {
   capturas: null,      // null = buscando; [] = ninguna
   avance: '',
   sentinel: null,      // respuesta de /api/v1/comparar/sentinel (null = sin pedir o cargando)
+  escenas: { t0: null, t1: null },  // escena Sentinel-2 elegida a mano por lado (null = automática)
+  sentinelCargando: new Set(),      // lados ('t0'/'t1') con una escena elegida a mano en camino
+  sentinelSerie: 0,
   ndvi: undefined,     // undefined = sin pedir o cargando; null = falló
   pidiendo: new Set(),
   volverFoco: null,
@@ -1253,23 +1276,23 @@ function infoLado(l) {
   }
   if (lado.fuente === 'sentinel') {
     const linea = `${nombre} · Sentinel-2 color real`;
-    if (cmp.sentinel === null) return { estado: 'cargando', linea, detalle: 'Buscando escenas Sentinel-2 (±15, ±30 y ±60 días)…' };
+    if (cmp.sentinel === null) return { estado: 'cargando', linea, detalle: 'Buscando la escena con menos nubes sobre el polígono (±15, ±30 y ±60 días)…' };
+    if (cmp.sentinelCargando.has(ref)) return { estado: 'cargando', linea, detalle: `Cargando la escena del ${fechaCL(cmp.escenas[ref])}…` };
     const s = cmp.sentinel[ref];
     if (!s || s.estado !== 'ok') return { estado: 'sin', linea, detalle: (s && s.mensaje) || cmp.sentinel.mensaje || SIN_DATOS };
-    const { fecha_min: fmin, fecha_max: fmax } = s;
-    let escenas = 'fecha de escenas no informada';
-    let rango = '';
-    if (fmin && fmax && fmin === fmax) {
-      escenas = `escena ${fechaCL(fmin)}`;
-      rango = difDias(fmin, fechaRef, ref);
-    } else if (fmin && fmax) {
-      escenas = `escenas ${fechaCL(fmin)} a ${fechaCL(fmax)}`;
-      rango = `${difDias(fmin, fechaRef, ref).replace(` de ${ref}`, '')} a ${difDias(fmax, fechaRef, ref)}`;
-    }
+    const fecha = s.fecha_escena || (s.fecha_min === s.fecha_max ? s.fecha_min : null);
+    const partes = [`${nombre} · Sentinel-2`, fecha ? `escena ${fechaCL(fecha)}` : 'fecha de escena no informada'];
+    if (s.nubes_pct !== null && s.nubes_pct !== undefined) partes.push(`${pctNubes(s.nubes_pct)} nubes sobre el polígono`);
+    if (fecha) partes.push(difDias(fecha, fechaRef, ref));
+    const detalle = [];
+    if (s.eleccion === 'manual') detalle.push('escena elegida a mano');
+    else if (s.limpia === false) detalle.push(`ninguna escena con ≤ ${cmp.sentinel.nubes_max_pct ?? 10} % de nubes a ±${s.ventana?.dias ?? '—'} d: se muestra la menos nublada`);
+    else detalle.push(`la más limpia a ±${s.ventana?.dias ?? '—'} d`);
+    if (s.nubes_pct > 0) detalle.push('zonas sin dato por nubes (fondo oscuro)');
+    if (s.incompleto) detalle.push('per_api_gee no respondió al ampliar la ventana');
     return {
-      estado: 'ok', tiles: [s.tile_url], maxzoom: 20, atribucion: 'Copernicus Sentinel-2 vía Google Earth Engine',
-      linea: `${nombre} · Sentinel-2 · ${escenas} · 10 m`,
-      detalle: [rango, `${s.images} escena(s), mediana`, `ventana ±${s.ventana?.dias ?? '—'} d`].filter(Boolean).join(' · '),
+      estado: 'ok', tiles: [s.tile_url], maxzoom: 20, atribucion: 'Copernicus Sentinel-2 vía Google Earth Engine · Cloud Score+',
+      linea: partes.join(' · '), detalle: detalle.join(' · '),
     };
   }
   // NDVI t0/t1 (endpoint existente, ventana [fecha, fecha + 15 días])
@@ -1296,10 +1319,22 @@ function opcionesCapturaLado(l) {
   return cmp.capturas.map((c, j) => `<option value="${j}"${j === cmp.lados[l].captura ? ' selected' : ''}>captura ${fechaCL(c.fecha)} (${esc(difDias(c.fecha, cmp.consulta[ref], ref))}) · ${esc(textoRes(c.resolucion))}</option>`).join('');
 }
 
+// Candidatas Sentinel-2 del lado (fecha · % nubes sobre el polígono), para elegir otra escena a mano.
+function selectorEscenas(l) {
+  const { ref, nombre } = LADOS[l];
+  const s = cmp.sentinel && cmp.sentinel[ref];
+  if (cmp.lados[l].fuente !== 'sentinel' || cmp.sentinelCargando.has(ref) || !s) return '';
+  const cands = s.candidatas || [];
+  if (cands.length < 2) return '';
+  const actual = s.fecha_escena || s.escena_pedida;  // si la escena elegida no cargó, sigue marcada para poder cambiarla
+  const opciones = cands.map((c) => `<option value="${esc(c.fecha)}"${c.fecha === actual ? ' selected' : ''}>${fechaCL(c.fecha)} · ${esc(pctNubes(c.nubes_pct))} nubes</option>`).join('');
+  return `<select class="cmp-sel" data-escena="${l}" aria-label="Escena Sentinel-2 ${nombre} (fecha y nubes sobre el polígono)">${opciones}</select>`;
+}
+
 function pintarEtiqueta(l, info) {
   const lado = cmp.lados[l];
   const capturas = lado.fuente === 'wayback' && cmp.capturas && cmp.capturas.length > 1
-    ? `<select class="cmp-sel" data-captura="${l}" aria-label="Fecha de captura ${LADOS[l].nombre}">${opcionesCapturaLado(l)}</select>` : '';
+    ? `<select class="cmp-sel" data-captura="${l}" aria-label="Fecha de captura ${LADOS[l].nombre}">${opcionesCapturaLado(l)}</select>` : selectorEscenas(l);
   $(`cmp-etq-${l}`).innerHTML = `
     <div class="cmp-etq-linea">${esc(info.linea)}</div>
     <div class="cmp-etq-dif">${esc(info.detalle || '')}</div>
@@ -1355,15 +1390,26 @@ function pintarComparador() {
 async function cargarSentinelCmp(pedido) {
   const r = estado.resultados[cmp.i];
   const c = cmp.consulta;
+  const serie = ++cmp.sentinelSerie;
+  const elegidas = ['t0', 't1'].filter((ref) => cmp.escenas[ref]).map((ref) => `&escena_${ref}=${cmp.escenas[ref]}`).join('');
   let d;
   try {
-    d = await getJSON(`api/v1/comparar/sentinel?region=${encodeURIComponent(c.region)}&id=${encodeURIComponent(r.id)}&t0=${c.t0}&t1=${c.t1}&cloud=${encodeURIComponent(c.cloud || 40)}`);
+    d = await getJSON(`api/v1/comparar/sentinel?region=${encodeURIComponent(c.region)}&id=${encodeURIComponent(r.id)}&t0=${c.t0}&t1=${c.t1}&cloud=${encodeURIComponent(c.cloud || 80)}${elegidas}`);
   } catch (err) {
     d = { estado: 'sin_datos', mensaje: `Sentinel-2: ${SIN_DATOS}` };
   }
-  if (pedido !== cmp.pedido) return;
+  if (pedido !== cmp.pedido || serie !== cmp.sentinelSerie) return;
   cmp.sentinel = d;
+  cmp.sentinelCargando.clear();
   pintarComparador();
+}
+
+// Escena elegida a mano en un lado: se vuelve a pedir (el otro lado sale de la cache del backend).
+function elegirEscena(l, fecha) {
+  const { ref } = LADOS[l];
+  cmp.escenas[ref] = fecha;
+  cmp.sentinelCargando.add(ref);
+  cargarSentinelCmp(cmp.pedido);
 }
 
 async function cargarNdviCmp(pedido) {
@@ -1425,6 +1471,8 @@ async function abrirComparador(i) {
     capturas: null,
     avance: '',
     sentinel: null,
+    escenas: { t0: null, t1: null },
+    sentinelCargando: new Set(),
     ndvi: undefined,
     pidiendo: new Set(),
     pct: 50,
@@ -1465,6 +1513,8 @@ $('cmp-mapas').addEventListener('change', (ev) => {
     cargarFuentesCmp();
   } else if (t.dataset.captura) {
     cmp.lados[t.dataset.captura].captura = Number(t.value);
+  } else if (t.dataset.escena) {
+    elegirEscena(t.dataset.escena, t.value);
   } else {
     return;
   }

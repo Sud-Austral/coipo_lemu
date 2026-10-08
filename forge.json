@@ -3,8 +3,8 @@
   "slug": "lemu2-0",
   "environment": "lab",
   "runtime": "docker",
-  "version": "2026.10.08.6",
-  "description": "Deteccion de cambios de cobertura forestal (corta no autorizada): NDVI Sentinel-2 t0 vs t1 por poligono de bosque CIREN de la comuna, predio CIREN (rol SII) cruzado con planes de manejo SAFF del mismo rol o cercanos y rodales SIGCRA, imagen Esri Wayback, comparador antes/despues con cortina (Wayback, Google, Sentinel-2 color real y NDVI) y bases Bing/Google.",
+  "version": "2026.10.08.7",
+  "description": "Deteccion de cambios de cobertura forestal (corta no autorizada): NDVI Sentinel-2 t0 vs t1 por poligono de bosque CIREN de la comuna (nubes quitadas por pixel con Cloud Score+), predio CIREN (rol SII) cruzado con planes de manejo SAFF del mismo rol o cercanos y rodales SIGCRA, imagen Esri Wayback, comparador antes/despues con cortina (Wayback, Google, Sentinel-2 color real con la escena mas limpia sobre el poligono y NDVI) y bases Bing/Google.",
   "required_secrets": ["GEE_API_KEY", "SIGCRA_API_KEY", "SAFF_API_KEY"],
   "secret_bindings": [
     {"environment": "lab", "from_slug": "api-gee", "from_key": "SERVICE_API_KEY", "as": "GEE_API_KEY"},

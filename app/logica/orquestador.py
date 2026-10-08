@@ -2,8 +2,12 @@
 
 1. Poligonos de bosque CIREN de la comuna (zonas_ciren, cache 7 dias).
 2. NDVI medio t0/t1 por poligono en per_api_gee /v1/zonal/ndvi-change, en
-   lotes de <= 1000 con concurrencia 3. Tarda: corre como tarea en segundo
-   plano y el endpoint responde de inmediato con el avance.
+   lotes de <= 1000 con concurrencia 3, con mascara de nubes por pixel
+   Cloud Score+ (`mascara='cs_plus'`). Si menos de la mitad del poligono
+   queda sin nubes en t0 o t1, GEE devuelve `motivo='nubes'`: el poligono no
+   se marca con cambio y se cuenta aparte (sin imagen limpia). Tarda: corre
+   como tarea en segundo plano y el endpoint responde de inmediato con el
+   avance.
 3. Poligonos con caida de NDVI (cambio_vegetacion) -> predio CIREN que
    contiene el centroide (predios_ciren, cache 7 dias) -> estado con los
    planes SAFF ya cargados en memoria: por rol y, de respaldo, por cercania
@@ -28,6 +32,9 @@ from app.clientes import gee
 from app.logica import cambio_vegetacion, ficha_punto, lista_negra, predios_ciren, rol, zonas_ciren
 
 CACHE_TTL_S = 6 * 3600
+# Tope de CLOUDY_PIXEL_PERCENTAGE por escena: con la mascara por pixel una
+# escena nublada en su conjunto aun aporta los pixeles despejados.
+CLOUD_ESCENA_DEFECTO = 80
 CACHE_FALLA_TTL_S = 120  # si GEE fallo: lo justo para que el polling lea el resultado
 TAMANO_LOTE = 1000
 CONCURRENCIA_LOTES = 3
@@ -123,6 +130,8 @@ async def _calcular(t: Trabajo, config: dict) -> None:
 
         respuestas = await asyncio.gather(*(lote(zs) for zs in lotes))
         valores: dict = {}
+        cobertura: dict = {}
+        nubes: set = set()
         errores = []
         imagenes = {"t0": 0, "t1": 0}
         for resp in respuestas:
@@ -133,6 +142,9 @@ async def _calcular(t: Trabajo, config: dict) -> None:
                 imagenes[k] = max(imagenes[k], (resp.get("images") or {}).get(k) or 0)
             for it in resp.get("items") or []:
                 valores[it.get("id")] = (it.get("ndvi_t0"), it.get("ndvi_t1"))
+                cobertura[it.get("id")] = (it.get("cobertura_t0"), it.get("cobertura_t1"))
+                if it.get("motivo") == "nubes":
+                    nubes.add(it.get("id"))
         # Geometria exacta solo para dibujar los poligonos con cambio (la
         # simplificada de GEE deja bordes vecinos cruzados y esquinas en punta).
         con_cambio = [
@@ -149,6 +161,8 @@ async def _calcular(t: Trabajo, config: dict) -> None:
         t.ndvi = {
             "zonas": zonas,
             "valores": valores,
+            "cobertura": cobertura,
+            "nubes": nubes,
             "exactas": exactas,
             "errores": errores,
             "lotes": len(lotes),
@@ -177,6 +191,7 @@ def _base(t: Trabajo, config: dict) -> dict:
         "cloud": t.cloud,
         "min_ha": t.min_ha,
         "indice": "ndvi",
+        "mascara_nubes": "cs_plus",
         "umbral_delta": -cambio_vegetacion.UMBRAL_CAIDA_NDVI,
     }
 
@@ -210,7 +225,12 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
 
     con_cambio = []
     sin_ndvi = 0
+    sin_imagen_limpia = 0
+    nubes, cobertura = n.get("nubes") or set(), n.get("cobertura") or {}
     for z in zonas:
+        if z["id"] in nubes:
+            sin_imagen_limpia += 1
+            continue
         n0, n1 = valores.get(z["id"], (None, None))
         d = cambio_vegetacion.delta(n0, n1)
         if d is None:
@@ -231,6 +251,7 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
         ]
         ev = lista_negra.evaluar(puntos is not None, predio, planes_rol, cercanos or 0, RADIO_PLANES_KM)
         exacta = n.get("exactas", {}).get(z["id"])
+        c0, c1 = cobertura.get(z["id"], (None, None))
         con_cambio.append({
             "id": z["id"],
             "uso": z.get("uso"),
@@ -239,6 +260,8 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
             "ndvi_t0": n0,
             "ndvi_t1": n1,
             "delta": round(d, 4),
+            "cobertura_t0": c0,
+            "cobertura_t1": c1,
             "centroide": c,
             "estado": ev.estado,
             "motivo": ev.motivo,
@@ -258,8 +281,9 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
         "poligonos_evaluados": len(zonas),
         "ha_evaluadas": round(ha_evaluadas, 1),
         "poligonos_capa": n["poligonos_capa"],
-        "con_ndvi": len(zonas) - sin_ndvi,
+        "con_ndvi": len(zonas) - sin_ndvi - sin_imagen_limpia,
         "sin_ndvi": sin_ndvi,
+        "sin_imagen_limpia": sin_imagen_limpia,
         "con_cambio": len(con_cambio),
         "ha_con_cambio": round(sum(p.get("superf_ha") or 0 for p in con_cambio), 1),
         "alertas": contar(lista_negra.ESTADO_ALERTA),
@@ -295,7 +319,7 @@ def _progreso(t: Trabajo) -> dict:
     }
 
 
-async def deteccion(region: str, t0: str, t1: str, cloud: int = 40, min_ha: float = zonas_ciren.MIN_HA_DEFECTO) -> dict:
+async def deteccion(region: str, t0: str, t1: str, cloud: int = CLOUD_ESCENA_DEFECTO, min_ha: float = zonas_ciren.MIN_HA_DEFECTO) -> dict:
     """Devuelve el resultado si esta listo; si no, lanza (o sigue) el calculo y entrega el avance."""
     config = REGIONES.get(region)
     if not config:
