@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.clientes import gee, saff, sigcra
-from app.logica import capas, ficha_punto, lista_negra, orquestador, predios_ciren, rol, zonas_ciren
+from app.logica import capas, comparar, ficha_punto, lista_negra, orquestador, predios_ciren, rol, zonas_ciren
 from app.logica.orquestador import REGIONES, info_regiones
 
 app = FastAPI(title="Lemu 2.0", version="0.4.0", docs_url=None, redoc_url=None, openapi_url=None)
@@ -85,6 +85,25 @@ async def deteccion(
 async def sentinel_tiles(region: str = Query(...), t0: date = Query(...), t1: date = Query(...)):
     config = _region(region)
     return await capas.tiles_sentinel(config["bbox"], t0.isoformat(), t1.isoformat())
+
+
+@app.get("/api/v1/comparar/sentinel")
+async def comparar_sentinel(
+    region: str = Query(...),
+    id: int = Query(..., description="objectid del poligono CIREN"),
+    t0: date = Query(...),
+    t1: date = Query(...),
+    cloud: int = Query(40, ge=0, le=100),
+):
+    """Sentinel-2 color real del poligono en t0 y t1 (ventana +-15/30/60 dias) para el comparador."""
+    config = _region(region)
+    if t0 >= t1:
+        raise HTTPException(status_code=400, detail="t0_debe_ser_anterior_a_t1")
+    try:
+        return await comparar.sentinel(region, config, id, t0.isoformat(), t1.isoformat(), cloud)
+    except Exception as exc:  # noqa: BLE001 - el comparador nunca responde 500
+        return {"region": region, "id": id, "estado": "sin_datos", "mensaje": "Sin datos por el momento",
+                "error": type(exc).__name__}
 
 
 @app.get("/api/v1/ciren/punto")

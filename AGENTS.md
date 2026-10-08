@@ -61,6 +61,32 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
   codigo de comuna y debe coincidir con `comudere`; varios roles por campo se
   aceptan; la comuna se compara sin tildes. Rotulos sin numero (`SR`, rios,
   rutas) no son rol.
+- Comparador antes/despues (`web/app.js`, seccion «comparador»): se abre al
+  hacer clic en un poligono con cambio del mapa, con el boton «Comparar antes /
+  despues» de la tarjeta o de la ficha (boton primario en alertas). Modal sobre
+  mapa+panel (inset 5 %; pantalla completa en <= 900 px), Esc o ✕ cierra. Dos
+  MapLibre apilados y sincronizados (center/zoom/bearing/pitch con guarda
+  anti-bucle): abajo ANTES (t0), arriba DESPUES (t1) recortado con
+  `clip-path: inset(0 0 0 Xpx)`; linea blanca con manija arrastrable (pointer
+  events: mouse y tactil) y ←/→ 5 %. Contorno del poligono en ambos, fitBounds
+  padding 60, maxZoom 17. Fuente global (Alta resolucion | Sentinel-2 color real
+  | NDVI) y selector por lado (DESPUES ademas «Google (solo foto actual)», con
+  «fecha no informada»). Cada etiqueta muestra la fecha real y los dias respecto
+  a t0/t1; sin imagen: «Sin imagen para esta fecha», nunca una imagen de relleno.
+  - Wayback: se consulta la fecha de captura en el centroide (`identify` de
+    `metadataLayerUrl`, cache por version y punto) de todas las versiones
+    publicadas desde t0 − 3 anios (~40-50, concurrencia 6, 10-25 s), se
+    deduplica por fecha. ANTES = captura <= t0 mas cercana (si no hay, la mas
+    antigua, marcada «posterior a t0»); DESPUES = la mas cercana a t1 entre las
+    posteriores a ANTES (de preferencia >= t0). Si es la misma foto: «No hay foto
+    de alta resolucion distinta entre t0 y t1; usa Sentinel-2» con boton.
+  - Sentinel-2 color real: `/api/v1/comparar/sentinel?region&id&t0&t1&cloud`
+    (`logica/comparar.py`) -> per_api_gee `POST /v1/tiles/rgb` con el bbox del
+    poligono CIREN + 1 km; ventana ±15 dias, si no hay escenas ±30 y ±60 (la
+    primera con imagenes). Devuelve por lado `tile_url`, `images`,
+    `fecha_min`/`fecha_max` (rango real de escenas), `ventana`, o `sin_datos`.
+    Cache 30 min (no se cachea un fallo de GEE, que tampoco agranda la ventana).
+    Nunca 500. NDVI: reutiliza `/api/v1/sentinel/tiles`.
 - Bases del mapa: Esri (defecto), Bing (protocolo `bing://` -> quadkey),
   Google (`lyrs=s`) y OSM. Bing y Google solo para comparacion en el piloto
   interno. Vista por URL: `?base=sat|bing|google|osm&ciren=0&predios=1#zoom/lat/lon`.
@@ -77,12 +103,12 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
 
 | Fuente | Uso | Endpoint |
 |---|---|---|
-| per_api_gee | NDVI medio por poligono t0/t1 y teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi` |
+| per_api_gee | NDVI medio por poligono t0/t1, teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) y Sentinel-2 color real para el comparador (±15/30/60 dias, cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi`, `/v1/tiles/rgb` |
 | CIREN (publico) | Poligonos de bosque de la comuna (zonas de deteccion), capa raster, leyenda, popup por punto | `USOS_DE_LA_TIERRA__CONAF/MapServer` (capa 12 = Los Rios, CONAF 2024) |
 | CIREN / IDE Minagri (publico) | Predios rurales (deslindes SII) de la comuna con rol; capa raster y popup | `IDEMINAGRI/PROPIEDADES_RURALES/MapServer` (capa 11 = Los Rios, CIREN 2018) |
 | per_api_saff | Planes de manejo de los ultimos 10 anios, filtrados por `Comuna_Predio` (cache 6 h por comuna, tramos de 1 anio) | `/v1/historico/pm` |
 | per_api_sigcra | Rodales (GeoJSON 4326) de los 5 primeros planes de la ficha (los del rol primero, luego los mas cercanos) | `/v1/bosque-co2/rodales?solicitud=` |
-| Esri Wayback (front) | Imagen de archivo real con fecha de captura | `waybackconfig.json` + `identify` de metadata |
+| Esri Wayback (front) | Imagen de archivo real con fecha de captura (boton «Mejorar calidad» y comparador) | `waybackconfig.json` + `identify` de metadata |
 
 Datos personales SAFF: `app/clientes/saff.py` deja solo `CAMPOS_PUBLICOS`
 (lista blanca) apenas llega la respuesta; ningun nombre/RUT/correo/sexo/etnia
@@ -150,6 +176,15 @@ o hay `Nro.Resolucion` y `Super.Aprobada` > 0, con `Fec.Resolucion` <= t1
 - La capa predial es CIREN 2018: predios subdivididos despues no estan.
 - Predios con rol no numerico (parques, «VP-…», «SR») solo se evaluan por
   cercania.
-- per_api_gee solo entrega NDVI coloreado, no color verdadero Sentinel-2.
+- `/v1/tiles/rgb` (color real) es nuevo en per_api_gee (version
+  2026.10.08.2): desplegarlo antes que esta version de Lemu; revisar en
+  produccion si `visualize(min 0, max 3000, gamma 1.3)` deja el bosque legible.
+- El NDVI del comparador usa la ventana [fecha, fecha + 15 dias] y no informa
+  la fecha de cada escena (el endpoint de teselas NDVI no la devuelve).
+- Probado en local (Edge headless, poligono CIREN 70150, t0 2025-10-01 / t1
+  2026-09-01): Wayback ANTES 26-02-2024 (Maxar 0,31 m) / DESPUES 01-01-2026
+  (Vantor 0,31 m); con t0 2026-07-01 ambos lados caen en 01-01-2026 y sale el
+  aviso de misma foto. Sentinel-2 color real no se pudo ver en local (GEE no
+  alcanzable).
 - Wayback: si t0, t1 y la ultima version comparten la misma captura en el
   punto, solo hay una fecha y no se puede comparar.

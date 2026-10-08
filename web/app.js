@@ -398,6 +398,19 @@ function marcarNdvi(modo) {
   });
 }
 
+// Teselas NDVI t0/t1 de la comuna (también las usa el comparador); null si falló.
+async function datosNdvi(c) {
+  const clave = `${c.region}|${c.t0}|${c.t1}`;
+  if (!estado.sentinel[clave]) {
+    try {
+      estado.sentinel[clave] = await getJSON(`api/v1/sentinel/tiles?region=${encodeURIComponent(c.region)}&t0=${c.t0}&t1=${c.t1}`);
+    } catch (err) {
+      return null;
+    }
+  }
+  return estado.sentinel[clave];
+}
+
 async function aplicarNdvi(modo) {
   estado.ndviModo = modo;
   marcarNdvi(modo);
@@ -411,15 +424,7 @@ async function aplicarNdvi(modo) {
   }
   const clave = claveSentinel();
   $('ndvi-estado').textContent = 'Cargando teselas NDVI…';
-  let data = estado.sentinel[clave];
-  if (!data) {
-    try {
-      data = await getJSON(`api/v1/sentinel/tiles?region=${encodeURIComponent(c.region)}&t0=${c.t0}&t1=${c.t1}`);
-      estado.sentinel[clave] = data;
-    } catch (err) {
-      data = null;
-    }
-  }
+  const data = await datosNdvi(c);
   if (estado.ndviModo !== modo || claveSentinel() !== clave) return;
   const capa = data && data[modo];
   if (!capa || capa.estado !== 'ok') {
@@ -551,16 +556,26 @@ function rolTarjeta(r) {
 function tarjetaPoligono(r, i) {
   const e = estadoDe(r);
   const inf = infoEstado(e);
-  const el = document.createElement('button');
-  el.type = 'button';
+  const el = document.createElement('div');
+  el.setAttribute('role', 'button');
+  el.tabIndex = 0;
   el.className = `punto${estado.sel === i ? ' sel' : ''}`;
   el.dataset.i = i;
   el.innerHTML = `
     <span class="n" style="background:${inf.color}">${i + 1}</span>
     <span class="fila"><span class="chip ${esc(e)}">${esc(inf.etq)}</span><b>${esc(r.subuso || r.uso || 'Bosque')}</b><span class="muted">${ha(r.superf_ha)}</span><span class="coords">${rolTarjeta(r)}</span><span class="coords">CIREN ${esc(r.id)}</span></span>
     <span class="fila ndvi">NDVI t0 <b>${f3(r.ndvi_t0)}</b> · t1 <b>${f3(r.ndvi_t1)}</b> · Δ <b style="color:#c0392b">${f3(r.delta)}</b></span>
-    <span class="fila motivo">${esc(r.motivo || '')}</span>`;
+    <span class="fila motivo">${esc(r.motivo || '')}</span>
+    <span class="fila"><button type="button" class="${e === 'alerta' ? 'btn-primario' : 'btn-secundario'} btn-comparar">Comparar antes / después</button></span>`;
   el.addEventListener('click', () => seleccionar(i));
+  el.addEventListener('keydown', (ev) => {
+    if (ev.target === el && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); seleccionar(i); }
+  });
+  el.querySelector('.btn-comparar').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    seleccionar(i);
+    abrirComparador(i);
+  });
   return el;
 }
 
@@ -674,7 +689,9 @@ $('form-controles').addEventListener('submit', detectar);
     if (Date.now() < ignorarClickHasta) return;  // punto y relleno en el mismo clic
     ignorarClickHasta = Date.now() + 400;
     const i = ev.features[0].properties.i;
-    if (Number.isInteger(i)) seleccionar(i);
+    if (!Number.isInteger(i)) return;
+    seleccionar(i);
+    abrirComparador(i);
   });
   map.on('mouseenter', capa, () => { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', capa, () => { map.getCanvas().style.cursor = ''; });
@@ -729,6 +746,7 @@ function actualizarEstado(i, est) {
   if (!r || !est?.estado) return;
   r.estado = est.estado;
   r.motivo = est.motivo;
+  if (estado.sel === i) marcarBotonFicha(r);
   pintarCambiosMapa();
   actualizarConteos();
   const vieja = document.querySelector(`.punto[data-i="${i}"]`);
@@ -741,6 +759,12 @@ function limpiarFichaMapa() {
   if (map.getSource('referencias')) map.getSource('referencias').setData(vacio);
   dibujarPredio(null);
 }
+
+function marcarBotonFicha(r) {
+  $('ficha-comparar').className = `${estadoDe(r) === 'alerta' ? 'btn-primario' : 'btn-secundario'} btn-comparar`;
+}
+
+$('ficha-comparar').addEventListener('click', () => { if (estado.sel !== null) abrirComparador(estado.sel); });
 
 function filaDato(dt, dd) {
   return `<dt>${dt}</dt><dd>${dd}</dd>`;
@@ -797,6 +821,7 @@ async function cargarFicha(i) {
   const pedido = ++estado.fichaPedido;
   $('ficha').hidden = false;
   $('ficha-titulo').textContent = `Ficha del polígono ${i + 1} · CIREN ${r.id}`;
+  marcarBotonFicha(r);
   const cuerpo = $('ficha-cuerpo');
   cuerpo.innerHTML = '<p class="msg">Buscando predio (CIREN), planes de manejo (SAFF) y rodales (SIGCRA) desde el centroide…</p>';
   limpiarFichaMapa();
@@ -884,7 +909,17 @@ function fechaCaptura(attrs) {
   return null;
 }
 
-async function capturaEnPunto(version, lon, lat) {
+// Fecha de captura de una versión en un punto; cacheada (la piden la ficha y el comparador).
+const cacheCapturas = new Map();
+function capturaEnPunto(version, lon, lat) {
+  const clave = `${version.release}|${lon.toFixed(5)}|${lat.toFixed(5)}`;
+  if (!cacheCapturas.has(clave)) {
+    cacheCapturas.set(clave, consultarCaptura(version, lon, lat).catch((err) => { cacheCapturas.delete(clave); throw err; }));
+  }
+  return cacheCapturas.get(clave);
+}
+
+async function consultarCaptura(version, lon, lat) {
   const ext = `${lon - 0.05},${lat - 0.05},${lon + 0.05},${lat + 0.05}`;
   const url = `${version.metadataLayerUrl}/identify?geometry=${lon},${lat}&geometryType=esriGeometryPoint&sr=4326&layers=all&tolerance=0&mapExtent=${ext}&imageDisplay=400,400,96&returnGeometry=false&f=json`;
   const d = await getJSON(url);
@@ -901,6 +936,10 @@ async function capturaEnPunto(version, lon, lat) {
   };
 }
 
+function urlWayback(version) {
+  return version.itemURL.replace('{level}', '{z}').replace('{row}', '{y}').replace('{col}', '{x}');
+}
+
 function textoCaptura(c) {
   const res = Number.isFinite(c.resolucion) ? ` · ${c.resolucion.toLocaleString('es-CL', { maximumFractionDigits: 2 })} m` : '';
   return `captura ${fechaCL(c.fecha)}${res}${c.proveedor ? ` · ${c.proveedor}` : ''}`;
@@ -915,7 +954,7 @@ function mostrarCapturaWayback() {
   if (map.getSource('wayback')) map.removeSource('wayback');
   map.addSource('wayback', {
     type: 'raster', tileSize: 256, maxzoom: 19,
-    tiles: [c.version.itemURL.replace('{level}', '{z}').replace('{row}', '{y}').replace('{col}', '{x}')],
+    tiles: [urlWayback(c.version)],
     attribution: 'Esri World Imagery Wayback',
   });
   map.addLayer({ id: 'wayback', type: 'raster', source: 'wayback' }, 'tope-base');
@@ -994,6 +1033,443 @@ function cerrarWayback() {
 
 $('btn-mejorar').addEventListener('click', mejorarImagen);
 $('wayback-volver').addEventListener('click', cerrarWayback);
+
+/* ---------- comparador antes / después (cortina) ---------- */
+
+// Dos mapas apilados y sincronizados: abajo ANTES (t0), arriba DESPUÉS (t1)
+// recortado con clip-path desde la línea. Solo imágenes reales con su fecha.
+const WAYBACK_ANIOS_ATRAS = 3;   // versiones Wayback publicadas desde t0 − 3 años
+const WAYBACK_CONCURRENCIA = 6;
+const LADOS = {
+  a: { nombre: 'ANTES', ref: 't0' },
+  b: { nombre: 'DESPUÉS', ref: 't1' },
+};
+const FUENTES_CMP = {
+  wayback: 'Alta resolución (Wayback)',
+  google: 'Google (solo foto actual)',
+  sentinel: 'Sentinel-2 color real',
+  ndvi: 'NDVI Sentinel-2',
+};
+
+const cmp = {
+  i: null,
+  pedido: 0,
+  mapas: null,
+  listos: null,
+  pct: 50,
+  consulta: null,
+  lados: { a: { fuente: 'wayback', captura: null }, b: { fuente: 'wayback', captura: null } },
+  capturas: null,      // null = buscando; [] = ninguna
+  avance: '',
+  sentinel: null,      // respuesta de /api/v1/comparar/sentinel (null = sin pedir o cargando)
+  ndvi: undefined,     // undefined = sin pedir o cargando; null = falló
+  pidiendo: new Set(),
+  volverFoco: null,
+};
+
+function dias(f, ref) {
+  return Math.round((Date.parse(f) - Date.parse(ref)) / 86400000);
+}
+
+function difDias(f, ref, nombre) {
+  const d = dias(f, ref);
+  if (d === 0) return `mismo día que ${nombre}`;
+  return `${d < 0 ? '−' : '+'}${Math.abs(d).toLocaleString('es-CL')} d de ${nombre}`;
+}
+
+async function mapaLimitado(items, n, fn, alAvanzar) {
+  const salida = new Array(items.length);
+  let siguiente = 0;
+  let listos = 0;
+  async function trabajador() {
+    while (siguiente < items.length) {
+      const j = siguiente++;
+      salida[j] = await fn(items[j]).catch(() => null);
+      listos += 1;
+      if (alAvanzar) alAvanzar(listos, items.length);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, trabajador));
+  return salida;
+}
+
+// Capturas Wayback distintas (por fecha real) en el punto, de la más antigua a la más nueva.
+async function capturasWaybackPunto(lon, lat, desde, alAvanzar) {
+  const lista = await configWayback();
+  const versiones = lista.filter((v) => v.publicada >= desde);
+  const res = (await mapaLimitado(versiones, WAYBACK_CONCURRENCIA, (v) => capturaEnPunto(v, lon, lat), alAvanzar)).filter(Boolean);
+  const unicas = new Map();
+  res.forEach((c) => { if (!unicas.has(c.fecha)) unicas.set(c.fecha, c); });  // gana la primera versión que la publicó
+  return [...unicas.values()].sort((x, y) => x.fecha.localeCompare(y.fecha));
+}
+
+// ANTES: la captura ≤ t0 más cercana (si no hay, la más antigua). DESPUÉS: la
+// más cercana a t1 entre las posteriores a ANTES (de preferencia ≥ t0).
+function elegirCapturas(caps, t0, t1) {
+  if (!caps.length) return { a: null, b: null };
+  const previa = [...caps].reverse().find((c) => c.fecha <= t0);
+  const a = previa ? caps.indexOf(previa) : 0;
+  const despues = caps.filter((c) => c.fecha > caps[a].fecha);
+  const pref = despues.filter((c) => c.fecha >= t0);
+  const pool = pref.length ? pref : despues;
+  if (!pool.length) return { a, b: a };
+  const mejor = pool.reduce((m, c) => (Math.abs(dias(c.fecha, t1)) < Math.abs(dias(m.fecha, t1)) ? c : m));
+  return { a, b: caps.indexOf(mejor) };
+}
+
+function crearMapaCmp(id, posAtribucion) {
+  const m = new maplibregl.Map({
+    container: id,
+    attributionControl: false,
+    maxZoom: 19,
+    dragRotate: false,
+    pitchWithRotate: false,
+    style: {
+      version: 8,
+      sources: { poli: { type: 'geojson', data: VACIO } },
+      layers: [
+        { id: 'fondo', type: 'background', paint: { 'background-color': '#1b2420' } },
+        { id: 'poli-halo', type: 'line', source: 'poli', layout: LINEA_REDONDA, paint: { 'line-color': HALO, 'line-width': 6 } },
+        { id: 'poli-borde', type: 'line', source: 'poli', layout: LINEA_REDONDA, paint: { 'line-color': '#ffffff', 'line-width': 2.5 } },
+      ],
+    },
+  });
+  m.addControl(new maplibregl.AttributionControl({ compact: true }), posAtribucion);
+  m.on('styledata', compactarAtribucion);
+  return m;
+}
+
+// center/zoom/bearing/pitch de un mapa al otro, con guarda anti-bucle.
+function sincronizarMapas(m1, m2) {
+  let copiando = false;
+  const copiar = (de, a) => () => {
+    if (copiando) return;
+    copiando = true;
+    a.jumpTo({ center: de.getCenter(), zoom: de.getZoom(), bearing: de.getBearing(), pitch: de.getPitch() });
+    copiando = false;
+  };
+  m1.on('move', copiar(m1, m2));
+  m2.on('move', copiar(m2, m1));
+}
+
+function asegurarMapasCmp() {
+  if (cmp.mapas) return cmp.listos;
+  const a = crearMapaCmp('cmp-map-a', 'bottom-left');
+  const b = crearMapaCmp('cmp-map-b', 'bottom-right');
+  b.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+  sincronizarMapas(a, b);
+  cmp.mapas = { a, b };
+  cmp.listos = Promise.all([a, b].map((m) => new Promise((ok) => (m.loaded() ? ok() : m.on('load', ok)))));
+  new ResizeObserver(aplicarCortina).observe($('cmp-mapas'));
+  return cmp.listos;
+}
+
+function aplicarCortina() {
+  const ancho = $('cmp-mapas').clientWidth;
+  const x = Math.round((ancho * cmp.pct) / 100);
+  $('cmp-map-b').style.clipPath = `inset(0 0 0 ${x}px)`;
+  $('cmp-linea').style.left = `${x}px`;
+  // Cada etiqueta queda dentro de su lado: nunca tapa la linea ni la otra foto.
+  ajustarEtiqueta($('cmp-etq-a'), x - 34);
+  ajustarEtiqueta($('cmp-etq-b'), ancho - x - 34);
+  const manija = $('cmp-manija');
+  manija.setAttribute('aria-valuenow', String(Math.round(cmp.pct)));
+  manija.setAttribute('aria-valuetext', `${Math.round(cmp.pct)} % ANTES`);
+}
+
+function ajustarEtiqueta(el, disponible) {
+  if (!el) return;
+  el.style.maxWidth = `${Math.max(0, disponible)}px`;
+  el.classList.toggle('compacta', disponible < 190);
+  el.classList.toggle('oculta', disponible < 80);
+}
+
+function moverCortina(pct) {
+  cmp.pct = Math.min(100, Math.max(0, pct));
+  aplicarCortina();
+}
+
+(() => {
+  const linea = $('cmp-linea');
+  let arrastrando = null;
+  linea.addEventListener('pointerdown', (ev) => {
+    arrastrando = ev.pointerId;
+    linea.setPointerCapture(ev.pointerId);
+    linea.classList.add('arrastrando');
+    $('cmp-manija').focus();
+    ev.preventDefault();
+  });
+  linea.addEventListener('pointermove', (ev) => {
+    if (arrastrando !== ev.pointerId) return;
+    const caja = $('cmp-mapas').getBoundingClientRect();
+    moverCortina(((ev.clientX - caja.left) / caja.width) * 100);
+  });
+  const soltar = (ev) => {
+    if (arrastrando !== ev.pointerId) return;
+    arrastrando = null;
+    linea.classList.remove('arrastrando');
+  };
+  linea.addEventListener('pointerup', soltar);
+  linea.addEventListener('pointercancel', soltar);
+  $('cmp-manija').addEventListener('keydown', (ev) => {
+    const paso = { ArrowLeft: -5, ArrowRight: 5, Home: -100, End: 100 }[ev.key];
+    if (paso === undefined) return;
+    ev.preventDefault();
+    moverCortina(cmp.pct + paso);
+  });
+})();
+
+/* --- qué muestra cada lado --- */
+
+function textoRes(m) {
+  return Number.isFinite(m) ? `${m.toLocaleString('es-CL', { maximumFractionDigits: 2 })} m` : '';
+}
+
+// {estado: ok|cargando|sin, tiles, linea, detalle, ndvi}
+function infoLado(l) {
+  const c = cmp.consulta;
+  const { nombre, ref } = LADOS[l];
+  const fechaRef = c[ref];
+  const lado = cmp.lados[l];
+  if (lado.fuente === 'wayback') {
+    const linea = `${nombre} · alta resolución`;
+    if (cmp.capturas === null) return { estado: 'cargando', linea, detalle: `Buscando fechas de captura Wayback… ${cmp.avance}` };
+    const cap = cmp.capturas[lado.captura];
+    if (!cap) return { estado: 'sin', linea, detalle: 'Sin fecha de captura Wayback en este punto' };
+    const notas = [difDias(cap.fecha, fechaRef, ref)];
+    if (l === 'a' && cap.fecha > c.t0) notas.push('posterior a t0');
+    if (l === 'b' && cap.fecha < c.t0) notas.push('anterior a t0');
+    return {
+      estado: 'ok', tiles: [urlWayback(cap.version)], maxzoom: 19, atribucion: 'Esri World Imagery Wayback',
+      linea: `${nombre} · captura ${fechaCL(cap.fecha)} · Wayback ${textoRes(cap.resolucion)}`.trim(),
+      detalle: `${notas.join(' · ')}${cap.proveedor ? ` · ${cap.proveedor}` : ''}`,
+    };
+  }
+  if (lado.fuente === 'google') {
+    return {
+      estado: 'ok', tiles: [0, 1, 2, 3].map((n) => `https://mt${n}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}`), maxzoom: 20, atribucion: 'Imágenes © Google',
+      linea: `${nombre} · Google · fecha no informada`, detalle: 'Foto actual de Google; no se conoce su fecha de captura',
+    };
+  }
+  if (lado.fuente === 'sentinel') {
+    const linea = `${nombre} · Sentinel-2 color real`;
+    if (cmp.sentinel === null) return { estado: 'cargando', linea, detalle: 'Buscando escenas Sentinel-2 (±15, ±30 y ±60 días)…' };
+    const s = cmp.sentinel[ref];
+    if (!s || s.estado !== 'ok') return { estado: 'sin', linea, detalle: (s && s.mensaje) || cmp.sentinel.mensaje || SIN_DATOS };
+    const { fecha_min: fmin, fecha_max: fmax } = s;
+    let escenas = 'fecha de escenas no informada';
+    let rango = '';
+    if (fmin && fmax && fmin === fmax) {
+      escenas = `escena ${fechaCL(fmin)}`;
+      rango = difDias(fmin, fechaRef, ref);
+    } else if (fmin && fmax) {
+      escenas = `escenas ${fechaCL(fmin)} a ${fechaCL(fmax)}`;
+      rango = `${difDias(fmin, fechaRef, ref).replace(` de ${ref}`, '')} a ${difDias(fmax, fechaRef, ref)}`;
+    }
+    return {
+      estado: 'ok', tiles: [s.tile_url], maxzoom: 20, atribucion: 'Copernicus Sentinel-2 vía Google Earth Engine',
+      linea: `${nombre} · Sentinel-2 · ${escenas} · 10 m`,
+      detalle: [rango, `${s.images} escena(s), mediana`, `ventana ±${s.ventana?.dias ?? '—'} d`].filter(Boolean).join(' · '),
+    };
+  }
+  // NDVI t0/t1 (endpoint existente, ventana [fecha, fecha + 15 días])
+  const linea = `${nombre} · NDVI Sentinel-2`;
+  if (cmp.ndvi === undefined) return { estado: 'cargando', linea, detalle: 'Cargando teselas NDVI…' };
+  const n = cmp.ndvi && cmp.ndvi[ref];
+  if (!n || n.estado !== 'ok') return { estado: 'sin', linea, detalle: (n && n.mensaje) || `Sentinel-2: ${SIN_DATOS}` };
+  const v = n.ventana || {};
+  return {
+    estado: 'ok', tiles: [n.tile_url], maxzoom: 20, atribucion: 'Copernicus Sentinel-2 vía Google Earth Engine', ndvi: true,
+    linea: `${linea} · ventana ${fechaCL(v.inicio)} a ${fechaCL(v.fin)} · 10 m`,
+    detalle: `${n.images} imagen(es), mediana · no es color verdadero`,
+  };
+}
+
+function opcionesFuente(l) {
+  return Object.entries(FUENTES_CMP)
+    .filter(([k]) => l === 'b' || k !== 'google')
+    .map(([k, etq]) => `<option value="${k}"${cmp.lados[l].fuente === k ? ' selected' : ''}>${esc(etq)}</option>`).join('');
+}
+
+function opcionesCapturaLado(l) {
+  const { ref } = LADOS[l];
+  return cmp.capturas.map((c, j) => `<option value="${j}"${j === cmp.lados[l].captura ? ' selected' : ''}>captura ${fechaCL(c.fecha)} (${esc(difDias(c.fecha, cmp.consulta[ref], ref))}) · ${esc(textoRes(c.resolucion))}</option>`).join('');
+}
+
+function pintarEtiqueta(l, info) {
+  const lado = cmp.lados[l];
+  const capturas = lado.fuente === 'wayback' && cmp.capturas && cmp.capturas.length > 1
+    ? `<select class="cmp-sel" data-captura="${l}" aria-label="Fecha de captura ${LADOS[l].nombre}">${opcionesCapturaLado(l)}</select>` : '';
+  $(`cmp-etq-${l}`).innerHTML = `
+    <div class="cmp-etq-linea">${esc(info.linea)}</div>
+    <div class="cmp-etq-dif">${esc(info.detalle || '')}</div>
+    <div class="cmp-etq-ctrl">
+      <select class="cmp-sel" data-fuente="${l}" aria-label="Fuente de imagen ${LADOS[l].nombre}">${opcionesFuente(l)}</select>
+      ${capturas}
+    </div>`;
+  const msg = $(`cmp-msg-${l}`);
+  msg.hidden = info.estado === 'ok';
+  msg.innerHTML = info.estado === 'cargando'
+    ? `<span class="cmp-spin" aria-hidden="true"></span>${esc(info.detalle)}`
+    : `<b>Sin imagen para esta fecha</b><br>${esc(info.detalle || '')}`;
+}
+
+function pintarLado(l) {
+  const m = cmp.mapas[l];
+  const info = infoLado(l);
+  const clave = info.estado === 'ok' ? info.tiles[0] : '';
+  if (m.imgClave !== clave) {
+    if (m.getLayer('img')) m.removeLayer('img');
+    if (m.getSource('img')) m.removeSource('img');
+    if (clave) {
+      m.addSource('img', { type: 'raster', tileSize: 256, maxzoom: info.maxzoom, tiles: info.tiles, attribution: info.atribucion });
+      m.addLayer({ id: 'img', type: 'raster', source: 'img' }, 'poli-halo');
+    }
+    m.imgClave = clave;
+  }
+  pintarEtiqueta(l, info);
+  return info;
+}
+
+function pintarComparador() {
+  if (!cmp.mapas || cmp.i === null) return;
+  const infos = { a: pintarLado('a'), b: pintarLado('b') };
+  const { a, b } = cmp.lados;
+  document.querySelectorAll('[data-cmp-fuente]').forEach((btn) => {
+    const activo = a.fuente === btn.dataset.cmpFuente && b.fuente === btn.dataset.cmpFuente;
+    btn.classList.toggle('activo', activo);
+    btn.setAttribute('aria-pressed', String(activo));
+  });
+  $('cmp-leyenda-ndvi').hidden = !(infos.a.ndvi || infos.b.ndvi);
+  const usaWayback = a.fuente === 'wayback' || b.fuente === 'wayback';
+  const misma = a.fuente === 'wayback' && b.fuente === 'wayback' && cmp.capturas?.length && a.captura === b.captura;
+  const ninguna = usaWayback && cmp.capturas && !cmp.capturas.length;
+  const aviso = $('cmp-aviso');
+  aviso.hidden = !(misma || ninguna);
+  if (aviso.hidden) return;
+  aviso.innerHTML = `<span>${misma ? 'No hay foto de alta resolución distinta entre t0 y t1; usa Sentinel-2.' : 'No hay foto de alta resolución con fecha en este punto; usa Sentinel-2.'}</span>
+    <button type="button" class="btn-primario" id="cmp-usar-sentinel">Usar Sentinel-2</button>`;
+  $('cmp-usar-sentinel').addEventListener('click', () => usarFuente('sentinel'));
+}
+
+async function cargarSentinelCmp(pedido) {
+  const r = estado.resultados[cmp.i];
+  const c = cmp.consulta;
+  let d;
+  try {
+    d = await getJSON(`api/v1/comparar/sentinel?region=${encodeURIComponent(c.region)}&id=${encodeURIComponent(r.id)}&t0=${c.t0}&t1=${c.t1}&cloud=${encodeURIComponent(c.cloud || 40)}`);
+  } catch (err) {
+    d = { estado: 'sin_datos', mensaje: `Sentinel-2: ${SIN_DATOS}` };
+  }
+  if (pedido !== cmp.pedido) return;
+  cmp.sentinel = d;
+  pintarComparador();
+}
+
+async function cargarNdviCmp(pedido) {
+  const d = await datosNdvi(cmp.consulta);
+  if (pedido !== cmp.pedido) return;
+  cmp.ndvi = d;
+  pintarComparador();
+}
+
+// Pide solo los datos de las fuentes elegidas (Sentinel y NDVI se piden al usarlas).
+function cargarFuentesCmp() {
+  const usadas = new Set([cmp.lados.a.fuente, cmp.lados.b.fuente]);
+  if (usadas.has('sentinel') && !cmp.pidiendo.has('sentinel')) {
+    cmp.pidiendo.add('sentinel');
+    cargarSentinelCmp(cmp.pedido);
+  }
+  if (usadas.has('ndvi') && !cmp.pidiendo.has('ndvi')) {
+    cmp.pidiendo.add('ndvi');
+    cargarNdviCmp(cmp.pedido);
+  }
+}
+
+function usarFuente(fuente) {
+  ['a', 'b'].forEach((l) => { cmp.lados[l].fuente = fuente; });
+  cargarFuentesCmp();
+  pintarComparador();
+}
+
+async function cargarWaybackCmp(pedido) {
+  const r = estado.resultados[cmp.i];
+  const c = cmp.consulta;
+  const desde = `${Number(c.t0.slice(0, 4)) - WAYBACK_ANIOS_ATRAS}${c.t0.slice(4)}`;
+  let caps;
+  try {
+    caps = await capturasWaybackPunto(r.centroide.lon, r.centroide.lat, desde, (n, total) => {
+      if (pedido !== cmp.pedido) return;
+      cmp.avance = `${n}/${total} versiones`;
+      ['a', 'b'].forEach((l) => { if (cmp.lados[l].fuente === 'wayback') pintarEtiqueta(l, infoLado(l)); });
+    });
+  } catch (err) {
+    caps = [];
+  }
+  if (pedido !== cmp.pedido) return;
+  cmp.capturas = caps;
+  const elegidas = elegirCapturas(caps, c.t0, c.t1);
+  cmp.lados.a.captura = elegidas.a;
+  cmp.lados.b.captura = elegidas.b;
+  pintarComparador();
+}
+
+async function abrirComparador(i) {
+  const r = estado.resultados[i];
+  if (!r) return;
+  const pedido = ++cmp.pedido;
+  Object.assign(cmp, {
+    i,
+    consulta: estado.consulta || consultaActual(),
+    lados: { a: { fuente: 'wayback', captura: null }, b: { fuente: 'wayback', captura: null } },
+    capturas: null,
+    avance: '',
+    sentinel: null,
+    ndvi: undefined,
+    pidiendo: new Set(),
+    pct: 50,
+  });
+  if ($('comparador').hidden) cmp.volverFoco = document.activeElement;
+  $('comparador').hidden = false;
+  $('cmp-titulo').textContent = `Antes / después · polígono ${i + 1} · CIREN ${r.id}`;
+  $('cmp-fechas').textContent = `t0 ${fechaCL(cmp.consulta.t0)} · t1 ${fechaCL(cmp.consulta.t1)} · ${infoEstado(estadoDe(r)).etq}`;
+  $('cmp-cerrar').focus();
+  await asegurarMapasCmp();
+  if (pedido !== cmp.pedido) return;
+  Object.values(cmp.mapas).forEach((m) => {
+    m.resize();
+    m.getSource('poli').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: r.geometry, properties: {} }] });
+  });
+  cmp.mapas.a.fitBounds(cajaGeometria(r.geometry), { padding: 60, maxZoom: 17, animate: false });
+  aplicarCortina();
+  pintarComparador();
+  cargarWaybackCmp(pedido);
+}
+
+function cerrarComparador() {
+  if ($('comparador').hidden) return;
+  cmp.pedido += 1;
+  cmp.i = null;
+  $('comparador').hidden = true;
+  if (cmp.volverFoco && document.contains(cmp.volverFoco)) cmp.volverFoco.focus();
+}
+
+$('cmp-cerrar').addEventListener('click', cerrarComparador);
+$('comparador').addEventListener('click', (ev) => { if (ev.target === $('comparador')) cerrarComparador(); });
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && !$('comparador').hidden) cerrarComparador(); });
+document.querySelectorAll('[data-cmp-fuente]').forEach((btn) => btn.addEventListener('click', () => usarFuente(btn.dataset.cmpFuente)));
+$('cmp-mapas').addEventListener('change', (ev) => {
+  const t = ev.target;
+  if (t.dataset.fuente) {
+    cmp.lados[t.dataset.fuente].fuente = t.value;
+    cargarFuentesCmp();
+  } else if (t.dataset.captura) {
+    cmp.lados[t.dataset.captura].captura = Number(t.value);
+  } else {
+    return;
+  }
+  pintarComparador();
+});
 
 /* ---------- inicio ---------- */
 

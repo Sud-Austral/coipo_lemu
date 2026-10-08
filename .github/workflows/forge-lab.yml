@@ -128,6 +128,23 @@ jobs:
                 'sin_datos=', r.get('sin_datos'), 'predios=', (d.get('predios') or {}).get('predios'))
           PY
 
+      - name: Smoke test comparador Sentinel-2 (antes / despues)
+        if: steps.secrets.outputs.pending != 'true'
+        run: |
+          # Falla solo en HTTP 5xx; sin imagen o GEE caido es 'sin_datos' por lado. Imprime solo estados.
+          CODE="$(curl --silent --show-error --max-time 180 -o /tmp/lemu-comparar.json -w '%{http_code}' \
+            "http://127.0.0.1:${LEMU_PORT}/api/v1/comparar/sentinel?region=panguipulli&id=70150&t0=2026-07-01&t1=2026-09-01")"
+          echo "comparar HTTP $CODE"
+          if [ "$CODE" -ge 500 ]; then echo "::error::/api/v1/comparar/sentinel devolvio HTTP $CODE"; exit 1; fi
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/lemu-comparar.json'))
+          def lado(x):
+              x = x or {}
+              return {k: x.get(k) for k in ('estado', 'error', 'images', 'fecha_min', 'fecha_max')} | {'dias': (x.get('ventana') or {}).get('dias')}
+          print('Lemu 2.0 comparar:', 'estado=', d.get('estado'), 't0=', lado(d.get('t0')), 't1=', lado(d.get('t1')))
+          PY
+
       - name: Smoke test predio CIREN por punto
         if: steps.secrets.outputs.pending != 'true'
         run: |

@@ -114,6 +114,32 @@ async def tiles_ndvi(start: str, end: str, west: float, south: float, east: floa
         raise GeeError("gee_respuesta_invalida") from exc
 
 
+async def tiles_rgb(start: str, end: str, west: float, south: float, east: float, north: float, cloud: int = 40) -> dict:
+    """Teselas Sentinel-2 color real (mediana B4/B3/B2) del bbox (POST /v1/tiles/rgb).
+
+    Devuelve {tile_url, images, fecha_min, fecha_max, ventana}. Sin escenas
+    en la ventana -> GeeError gee_sin_imagenes.
+    """
+    url = f"{GEE_BASE_URL}/v1/tiles/rgb"
+    body = {"start": start, "end": end, "west": west, "south": south, "east": east, "north": north, "cloud": cloud}
+    headers = {"X-API-Key": GEE_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+            resp = await client.post(url, json=body, headers=headers)
+    except httpx.HTTPError as exc:
+        raise GeeError(f"gee_unreachable: {type(exc).__name__}") from exc
+    if resp.status_code == 401:
+        raise GeeError("gee_unauthorized")
+    if resp.status_code == 422 and "NO_SENTINEL2_IMAGES" in resp.text:
+        raise GeeError("gee_sin_imagenes")
+    if resp.status_code >= 400:
+        raise GeeError(f"gee_error_{resp.status_code}")
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise GeeError("gee_respuesta_invalida") from exc
+
+
 async def ping() -> bool:
     """True si per_api_gee responde /health."""
     url = f"{GEE_BASE_URL}/health"
