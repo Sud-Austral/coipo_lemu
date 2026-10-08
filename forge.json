@@ -3,8 +3,8 @@
   "slug": "lemu2-0",
   "environment": "lab",
   "runtime": "docker",
-  "version": "2026.10.08.2",
-  "description": "Deteccion de cambios de cobertura forestal (corta no autorizada): NDVI Sentinel-2 t0 vs t1, mascara CIREN, planes de manejo SAFF cercanos y rodales SIGCRA, imagen Esri Wayback.",
+  "version": "2026.10.08.3",
+  "description": "Deteccion de cambios de cobertura forestal (corta no autorizada): NDVI Sentinel-2 t0 vs t1 por poligono de bosque CIREN de la comuna, planes de manejo SAFF cercanos y rodales SIGCRA, imagen Esri Wayback y bases Bing/Google.",
   "required_secrets": ["GEE_API_KEY", "SIGCRA_API_KEY", "SAFF_API_KEY"],
   "secret_bindings": [
     {"environment": "lab", "from_slug": "api-gee", "from_key": "SERVICE_API_KEY", "as": "GEE_API_KEY"},

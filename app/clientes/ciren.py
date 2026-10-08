@@ -7,6 +7,8 @@ No hay autenticacion ni secreto que configurar.
 """
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 CIREN_BASE_URL = "https://esri.ciren.cl/server/rest/services/USOS_DE_LA_TIERRA__CONAF/MapServer"
@@ -116,6 +118,69 @@ async def query_punto(layer_id: int, lon: float, lat: float) -> dict | None:
     if not features:
         return None
     return features[0].get("attributes") or {}
+
+
+async def _get_json(client: httpx.AsyncClient, url: str, params: dict) -> dict:
+    try:
+        resp = await client.get(url, params=params)
+    except httpx.HTTPError as exc:
+        raise CirenError(f"ciren_unreachable: {type(exc).__name__}") from exc
+    if resp.status_code >= 400:
+        raise CirenError(f"ciren_error_{resp.status_code}")
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise CirenError("ciren_respuesta_invalida") from exc
+    if data.get("error"):
+        raise CirenError("ciren_query_error")
+    return data
+
+
+async def query_poligonos(
+    layer_id: int,
+    where: str,
+    out_fields: str,
+    max_allowable_offset: float = 0.0002,
+    geometry_precision: int = 5,
+    concurrencia: int = 3,
+    timeout_s: float = 120.0,
+) -> list[dict]:
+    """Todos los poligonos (GeoJSON 4326) de la capa que cumplen `where`.
+
+    Pagina con resultOffset/resultRecordCount usando el maxRecordCount que
+    declara el servicio, ordenado por objectid para que las paginas no se
+    traslapen. Lanza CirenError si cualquier pagina falla (nada de cargas
+    parciales).
+    """
+    url = f"{CIREN_BASE_URL}/{layer_id}"
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        info = await _get_json(client, url, {"f": "json"})
+        por_pagina = int(info.get("maxRecordCount") or 1000)
+        conteo = await _get_json(client, f"{url}/query", {"where": where, "returnCountOnly": "true", "f": "json"})
+        total = int(conteo.get("count") or 0)
+        sem = asyncio.Semaphore(concurrencia)
+
+        async def pagina(offset: int) -> list[dict]:
+            params = {
+                "where": where,
+                "outFields": out_fields,
+                "orderByFields": "objectid",
+                "resultOffset": offset,
+                "resultRecordCount": por_pagina,
+                "outSR": "4326",
+                "maxAllowableOffset": max_allowable_offset,
+                "geometryPrecision": geometry_precision,
+                "f": "geojson",
+            }
+            async with sem:
+                data = await _get_json(client, f"{url}/query", params)
+            return data.get("features") or []
+
+        paginas = await asyncio.gather(*(pagina(o) for o in range(0, total, por_pagina)))
+    features = [f for p in paginas for f in p]
+    if len(features) < total:
+        raise CirenError("ciren_paginacion_incompleta")
+    return features
 
 
 def _sin_tildes(texto: str) -> str:

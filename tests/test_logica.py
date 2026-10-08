@@ -3,61 +3,18 @@ from __future__ import annotations
 
 import pytest
 
-from app.logica import cambio_vegetacion, lista_negra, mascara_bosque
+import asyncio
+
+from app.logica import cambio_vegetacion, lista_negra
 
 
-class FakeRespGee:
-    def __init__(self, ndvi):
-        self._ndvi = ndvi
-
-    def get(self, key, default=None):
-        if key == "ndvi":
-            return self._ndvi
-        return default
-
-
-@pytest.mark.asyncio
-async def test_cambio_vegetacion_detecta_caida(monkeypatch):
-    async def fake_query_t0(lat, lon, start, end, cloud):
-        return {"ndvi": 0.75}
-
-    async def fake_query_t1(lat, lon, start, end, cloud):
-        return {"ndvi": 0.40}
-
-    calls = {"n": 0}
-
-    async def fake_query(lat, lon, start, end, cloud=40):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return await fake_query_t0(lat, lon, start, end, cloud)
-        return await fake_query_t1(lat, lon, start, end, cloud)
-
-    from app.clientes import gee
-
-    monkeypatch.setattr(gee, "query_point_index", fake_query)
-
-    resultado = await cambio_vegetacion.detectar_cambio_punto(
-        -39.6, -72.3, "2026-07-01", "2026-07-15", "2026-09-01", "2026-09-15"
-    )
-    assert resultado.ndvi_t0 == 0.75
-    assert resultado.ndvi_t1 == 0.40
-    assert resultado.delta == pytest.approx(-0.35)
-    assert resultado.cambio_detectado is True
-
-
-@pytest.mark.asyncio
-async def test_cambio_vegetacion_sin_cambio_significativo(monkeypatch):
-    async def fake_query(lat, lon, start, end, cloud=40):
-        return {"ndvi": 0.70}
-
-    from app.clientes import gee
-
-    monkeypatch.setattr(gee, "query_point_index", fake_query)
-
-    resultado = await cambio_vegetacion.detectar_cambio_punto(
-        -39.6, -72.3, "2026-07-01", "2026-07-15", "2026-09-01", "2026-09-15"
-    )
-    assert resultado.cambio_detectado is False
+def test_regla_de_cambio_usa_umbral():
+    assert cambio_vegetacion.delta(0.75, 0.40) == pytest.approx(-0.35)
+    assert cambio_vegetacion.hay_cambio(-0.35) is True
+    assert cambio_vegetacion.hay_cambio(-0.15) is True
+    assert cambio_vegetacion.hay_cambio(-0.149) is False
+    assert cambio_vegetacion.hay_cambio(None) is False
+    assert cambio_vegetacion.delta(None, 0.4) is None
 
 
 def test_es_uso_forestal():
@@ -115,43 +72,148 @@ def test_plan_aprobado_respeta_fecha_t1():
     assert plan_aprobado({"Estdo Solicitud": "RECHAZADA", "Super.Aprobada": 0}, None) is False
 
 
+def test_estado_listado_por_cercania():
+    assert lista_negra.evaluar_cercania(None, 3.0).estado == lista_negra.ESTADO_SIN_DATOS
+    assert lista_negra.evaluar_cercania(0, 3.0).estado == lista_negra.ESTADO_ALERTA
+    assert lista_negra.evaluar_cercania(2, 3.0).estado == lista_negra.ESTADO_REVISAR
+
+
+CUADRADO = {"type": "Polygon", "coordinates": [[[-72.2, -39.7], [-72.19, -39.7], [-72.19, -39.69], [-72.2, -39.69], [-72.2, -39.7]]]}
+
+
+def _zona(zid, ha=5.0, lon=-72.195):
+    return {"id": zid, "uso": "Bosques", "subuso": "Bosque Nativo", "superf_ha": ha,
+            "centroide": {"lat": -39.695, "lon": lon}, "geometry": CUADRADO}
+
+
+async def _esperar(orq, *args):
+    for _ in range(200):
+        r = await orq.deteccion(*args)
+        if r["estado"] != "calculando":
+            return r
+        await asyncio.sleep(0.01)
+    raise AssertionError("la deteccion no termino")
+
+
+@pytest.fixture
+def orq(monkeypatch):
+    from app.logica import ficha_punto, orquestador, zonas_ciren
+
+    async def fake_zonas(region, config):
+        return {"capa": 12, "anio": 2024, "zonas": [_zona(1), _zona(2), _zona(3), _zona(4, ha=0.4)]}
+
+    monkeypatch.setattr(zonas_ciren, "cargar_zonas", fake_zonas)
+    monkeypatch.setattr(ficha_punto, "precargar_saff", lambda comuna: None)
+    monkeypatch.setattr(orquestador, "TAMANO_LOTE", 2)
+    orquestador._trabajos.clear()
+    yield orquestador
+    orquestador._trabajos.clear()
+
+
 @pytest.mark.asyncio
-async def test_orquestador_sin_ndvi_es_sin_datos_y_no_cachea(monkeypatch):
+async def test_deteccion_poligonos_en_lotes_y_estado_saff(orq, monkeypatch):
     from app.clientes import gee
-    from app.logica import orquestador
+    from app.logica import ficha_punto
 
-    async def fake_query(lat, lon, start, end, cloud=40):
-        raise gee.GeeError("gee_unreachable")
+    lotes = []
 
-    monkeypatch.setattr(gee, "query_point_index", fake_query)
-    orquestador._cache.clear()
-    resultado = await orquestador.ejecutar_deteccion("panguipulli", "2026-07-01", "2026-09-01")
-    assert {r["lista_negra"]["estado"] for r in resultado["resultados"]} == {"sin_datos"}
-    assert orquestador._cache == {}
+    async def fake_zonal(fc, t0, t1, cloud=40, scale=20):
+        ids = [f["properties"]["id"] for f in fc["features"]]
+        lotes.append(ids)
+        valores = {1: (0.8, 0.3), 2: (0.8, 0.75), 3: (0.7, 0.5)}
+        return {"images": {"t0": 2, "t1": 3}, "scale": 20,
+                "items": [{"id": i, "ndvi_t0": valores[i][0], "ndvi_t1": valores[i][1]} for i in ids]}
+
+    monkeypatch.setattr(gee, "zonal_ndvi_change", fake_zonal)
+    # Plan SAFF a ~1 km del centroide: el poligono queda «revisar», no «alerta».
+    monkeypatch.setattr(ficha_punto, "planes_ubicados_en_cache", lambda comuna, centro: [(-39.695, -72.183)])
+    r = await _esperar(orq, "panguipulli", "2026-07-01", "2026-09-01", 40, 1.0)
+    assert sorted(sum(lotes, [])) == [1, 2, 3]  # el de 0,4 ha no se evalua
+    assert all(len(l) <= 2 for l in lotes)
+    assert r["estado"] == "listo"
+    assert r["resumen"]["poligonos_evaluados"] == 3
+    assert r["resumen"]["con_cambio"] == 2
+    assert [p["id"] for p in r["poligonos"]] == [1, 3]  # mas negativo primero
+    assert {p["estado"] for p in r["poligonos"]} == {"revisar"}
+    assert r["poligonos"][0]["planes_cercanos"] == 1
+    assert r["imagenes"] == {"t0": 2, "t1": 3}
+
+    # Sin planes cerca -> alerta; el estado se recalcula sin volver a GEE.
+    monkeypatch.setattr(ficha_punto, "planes_ubicados_en_cache", lambda comuna, centro: [])
+    r2 = await orq.deteccion("panguipulli", "2026-07-01", "2026-09-01", 40, 1.0)
+    assert r2["resumen"]["alertas"] == 2
+    assert len(lotes) == 2
 
 
 @pytest.mark.asyncio
-async def test_orquestador_cambio_forestal_usa_ficha(monkeypatch):
+async def test_deteccion_gee_caido_es_sin_datos_y_saff_cargando(orq, monkeypatch):
     from app.clientes import gee
-    from app.logica import ficha_punto, orquestador
+    from app.logica import ficha_punto
 
-    valores = iter([0.8, 0.3] * 3)
+    async def fake_zonal(fc, t0, t1, cloud=40, scale=20):
+        raise gee.GeeError("gee_unreachable: ConnectError")
 
-    async def fake_query(lat, lon, start, end, cloud=40):
-        return {"ndvi": next(valores)}
+    monkeypatch.setattr(gee, "zonal_ndvi_change", fake_zonal)
+    monkeypatch.setattr(ficha_punto, "planes_ubicados_en_cache", lambda comuna, centro: None)
+    r = await _esperar(orq, "panguipulli", "2026-07-01", "2026-09-01", 40, 1.0)
+    assert r["estado"] == "sin_datos"
+    assert r["gee"]["estado"] == "sin_datos"
+    assert r["resumen"]["sin_ndvi"] == 3 and r["resumen"]["con_cambio"] == 0
+    assert r["mensaje"].startswith("Sin datos por el momento")
+    trabajo = next(iter(orq._trabajos.values()))
+    assert trabajo.ttl_s == orq.CACHE_FALLA_TTL_S
 
-    async def fake_clasificar(lat, lon):
-        return mascara_bosque.ClasificacionUso("Bosques", "Bosque Nativo", True)
 
-    async def fake_ficha(comuna, centro, lat, lon, radio_km, t1, esperar_saff=True):
-        assert comuna == "PANGUIPULLI" and radio_km == 3.0
-        return {"radio_km": radio_km, "saff": {"estado": "ok"}, "sigcra": {"estado": "no_consultado"},
-                "planes": [], "dentro_de_rodal": None}
+@pytest.mark.asyncio
+async def test_deteccion_ciren_caido_es_sin_datos(orq, monkeypatch):
+    from app.logica import zonas_ciren
 
-    monkeypatch.setattr(gee, "query_point_index", fake_query)
-    monkeypatch.setattr(mascara_bosque, "clasificar_punto", fake_clasificar)
-    monkeypatch.setattr(ficha_punto, "ficha_punto", fake_ficha)
-    orquestador._cache.clear()
-    resultado = await orquestador.ejecutar_deteccion("panguipulli", "2026-07-01", "2026-09-01")
-    assert resultado["alertas"] == 3
-    orquestador._cache.clear()
+    async def falla(region, config):
+        raise zonas_ciren.ZonasError("ciren_unreachable")
+
+    monkeypatch.setattr(zonas_ciren, "cargar_zonas", falla)
+    r = await _esperar(orq, "panguipulli", "2026-07-01", "2026-09-01", 40, 1.0)
+    assert r["estado"] == "sin_datos" and "CIREN" in r["mensaje"]
+
+
+def test_centroide_y_punto_interior():
+    from app.logica import geo
+
+    lon, lat = geo.centroide(CUADRADO)
+    assert lon == pytest.approx(-72.195) and lat == pytest.approx(-39.695)
+    # Forma de C: el centroide cae en el hueco y se usa un punto interior.
+    c = {"type": "Polygon", "coordinates": [[[0, 0], [3, 0], [3, 1], [1, 1], [1, 2], [3, 2], [3, 3], [0, 3], [0, 0]]]}
+    x, y = geo.centroide(c)
+    assert geo.punto_en_geometria(x, y, c)
+    assert geo.bbox(c) == (0, 0, 3, 3)
+
+
+@pytest.mark.asyncio
+async def test_zonas_ciren_cache_disco_y_filtro(monkeypatch, tmp_path):
+    from app.clientes import ciren
+    from app.logica import zonas_ciren
+
+    llamadas = []
+
+    async def fake_query(layer_id, where, out_fields, **kw):
+        llamadas.append(where)
+        return [
+            {"type": "Feature", "properties": {"objectid": 7, "uso": "Bosques", "subuso": "Plantación", "superf_ha": 3.2}, "geometry": CUADRADO},
+            {"type": "Feature", "properties": {"objectid": 8, "uso": "Bosques", "subuso": "Bosque Nativo", "superf_ha": 0.5}, "geometry": CUADRADO},
+            # Anillo degenerado tras simplificar: se descarta.
+            {"type": "Feature", "properties": {"objectid": 9, "uso": "Bosques", "superf_ha": 2}, "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 1], [0, 0]]]}},
+        ]
+
+    monkeypatch.setattr(ciren, "query_poligonos", fake_query)
+    monkeypatch.setattr(zonas_ciren, "CACHE_DIR", tmp_path)
+    zonas_ciren._cache.clear()
+    cfg = {"comuna": "PANGUIPULLI", "ciren_layer": 12, "ciren_anio": 2024}
+    carga = await zonas_ciren.cargar_zonas("panguipulli", cfg)
+    assert "PANGUIPULLI" in llamadas[0] and "uso='Bosques'" in llamadas[0]
+    assert [z["id"] for z in carga["zonas"]] == [7, 8]
+    assert [z["id"] for z in zonas_ciren.filtrar(carga["zonas"], 1.0)] == [7]
+    assert (tmp_path / "zonas_panguipulli_capa12.json").exists()
+    zonas_ciren._cache.clear()
+    await zonas_ciren.cargar_zonas("panguipulli", cfg)  # desde disco
+    assert len(llamadas) == 1
+    zonas_ciren._cache.clear()

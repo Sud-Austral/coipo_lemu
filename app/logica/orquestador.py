@@ -1,25 +1,39 @@
-"""Orquesta el flujo completo: NDVI (GEE) -> mascara CIREN -> cruce SIGCRA -> lista negra SAFF.
+"""Orquesta la deteccion por poligonos: bosque CIREN -> NDVI zonal (GEE) -> estado SAFF.
 
-Cachea resultados en memoria por (region, t0, t1) para no recalcular ni
-volver a golpear las fuentes externas en cada carga del front.
+1. Poligonos de bosque CIREN de la comuna (zonas_ciren, cache 7 dias).
+2. NDVI medio t0/t1 por poligono en per_api_gee /v1/zonal/ndvi-change, en
+   lotes de <= 1000 con concurrencia 3. Tarda: corre como tarea en segundo
+   plano y el endpoint responde de inmediato con el avance.
+3. Poligonos con caida de NDVI (cambio_vegetacion) -> estado preliminar con
+   los planes SAFF ya cargados en memoria (lista_negra.evaluar_cercania). El
+   cruce con rodales SIGCRA se hace al abrir la ficha del poligono.
+
+El NDVI se cachea 6 h por (region, t0, t1, cloud, min_ha); el estado SAFF se
+recalcula en cada respuesta (es barato) para recoger la carga SAFF apenas
+termina.
 """
 from __future__ import annotations
 
+import asyncio
 import time
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from app.logica import cambio_vegetacion, ficha_punto, lista_negra, mascara_bosque
+from app.clientes import gee
+from app.logica import cambio_vegetacion, ficha_punto, lista_negra, zonas_ciren
 
-CACHE_TTL_S = 15 * 60
-_cache: dict[tuple, tuple[float, dict]] = {}
+CACHE_TTL_S = 6 * 3600
+CACHE_FALLA_TTL_S = 120  # si GEE fallo: lo justo para que el polling lea el resultado
+TAMANO_LOTE = 1000
+CONCURRENCIA_LOTES = 3
+RADIO_PLANES_KM = 3.0
+SIN_DATOS = "Sin datos por el momento"
 
-# Puntos de muestreo piloto para la region de Panguipulli (Los Rios). En una
-# iteracion posterior esto se reemplaza por una grilla real o por los
-# centroides de rodales SIGCRA.
-# - comuna: filtro de Comuna_Predio en SAFF.
+# Regiones de deteccion: la comuna define los poligonos CIREN y el filtro SAFF.
+# - comuna: filtro de nom_com en CIREN y de Comuna_Predio en SAFF.
 # - ciren_layer: capa del MapServer CIREN USOS_DE_LA_TIERRA__CONAF (12 = Los Rios, CONAF 2024).
 # - bbox: [oeste, sur, este, norte] de la comuna, para teselas Sentinel-2.
-REGIONES_PILOTO = {
+REGIONES = {
     "panguipulli": {
         "nombre": "Panguipulli",
         "comuna": "PANGUIPULLI",
@@ -27,18 +41,8 @@ REGIONES_PILOTO = {
         "ciren_anio": 2024,
         "centro": (-39.64, -72.2),
         "bbox": (-72.75, -39.95, -71.55, -39.30),
-        "puntos": [
-            {"lat": -39.636, "lon": -72.333},
-            {"lat": -39.715, "lon": -72.145},
-            {"lat": -39.52, "lon": -72.02},
-        ],
     }
 }
-RADIO_PLANES_KM = 3.0
-
-
-def _clave_cache(region: str, t0: str, t1: str) -> tuple:
-    return (region, t0, t1)
 
 
 def rango(fecha_iso: str, dias_ventana: int = 15) -> tuple[str, str]:
@@ -49,84 +53,235 @@ def rango(fecha_iso: str, dias_ventana: int = 15) -> tuple[str, str]:
     return base.isoformat(), fin.isoformat()
 
 
-async def ejecutar_deteccion(region: str, t0: str, t1: str, cloud: int = 40) -> dict:
-    """Ejecuta (o recupera de cache) la deteccion completa para una region y rango."""
-    clave = _clave_cache(region, t0, t1)
-    ahora = time.time()
-    if clave in _cache:
-        guardado_en, resultado = _cache[clave]
-        if ahora - guardado_en < CACHE_TTL_S:
-            return {**resultado, "desde_cache": True}
+@dataclass
+class Trabajo:
+    region: str
+    t0: str
+    t1: str
+    cloud: int
+    min_ha: float
+    estado: str = "calculando"
+    fase: str = "Cargando polígonos de bosque CIREN"
+    lotes_total: int = 0
+    lotes_listos: int = 0
+    iniciado_en: float = field(default_factory=time.time)
+    terminado_en: float | None = None
+    ttl_s: float = CACHE_TTL_S
+    ndvi: dict | None = None
+    tarea: asyncio.Task | None = None
 
-    config = REGIONES_PILOTO.get(region)
-    if not config:
-        return {
-            "region": region,
-            "t0": t0,
-            "t1": t1,
-            "error": "region_no_configurada",
-            "regiones_disponibles": list(REGIONES_PILOTO),
-        }
+    def vigente(self) -> bool:
+        return self.terminado_en is None or time.time() - self.terminado_en < self.ttl_s
 
-    t0_inicio, t0_fin = rango(t0)
-    t1_inicio, t1_fin = rango(t1)
 
-    resultados = []
-    for punto in config["puntos"]:
-        cambio = await cambio_vegetacion.detectar_cambio_punto(
-            punto["lat"], punto["lon"], t0_inicio, t0_fin, t1_inicio, t1_fin, cloud
-        )
-        item = cambio.to_dict()
-        if cambio.cambio_detectado:
-            clasificacion = await mascara_bosque.clasificar_punto(punto["lat"], punto["lon"])
-            item["uso_suelo"] = clasificacion.to_dict()
-            if clasificacion.es_forestal:
-                ficha = await ficha_punto.ficha_punto(
-                    config["comuna"], config["centro"], punto["lat"], punto["lon"],
-                    RADIO_PLANES_KM, date.fromisoformat(t1), esperar_saff=False,
-                )
-                item["lista_negra"] = lista_negra.evaluar_ficha(ficha).to_dict()
-            else:
-                item["lista_negra"] = {"estado": "descartado_no_forestal"}
-        elif cambio.delta is None:
-            # Sin NDVI en t0 o t1 (GEE no respondio o no hubo imagen): no se
-            # puede afirmar "sin cambio".
-            item["uso_suelo"] = None
-            item["lista_negra"] = {"estado": "sin_datos", "motivo": "Sin NDVI Sentinel-2 en t0 o t1"}
-        else:
-            item["uso_suelo"] = None
-            item["lista_negra"] = {"estado": "sin_cambio"}
-        resultados.append(item)
+_trabajos: dict[tuple, Trabajo] = {}
 
-    resultado = {
-        "region": region,
-        "region_nombre": config["nombre"],
-        "t0": t0,
-        "t1": t1,
-        "indice": "ndvi",
-        "puntos_evaluados": len(resultados),
-        "alertas": sum(1 for r in resultados if r.get("lista_negra", {}).get("estado") == "alerta"),
-        "revisar": sum(1 for r in resultados if r.get("lista_negra", {}).get("estado") == "revisar"),
-        "resultados": resultados,
-        "desde_cache": False,
+
+def _fc(zonas: list[dict]) -> dict:
+    return {
+        "type": "FeatureCollection",
+        "features": [{"type": "Feature", "properties": {"id": z["id"]}, "geometry": z["geometry"]} for z in zonas],
     }
-    # No se cachea si alguna fuente fallo, para reintentar en la proxima carga.
-    if not any(r.get("lista_negra", {}).get("estado") == "sin_datos" for r in resultados):
-        _cache[clave] = (ahora, resultado)
-    return resultado
+
+
+async def _calcular(t: Trabajo, config: dict) -> None:
+    """NDVI zonal de todos los poligonos; deja en t.ndvi lo necesario para responder."""
+    try:
+        try:
+            carga = await zonas_ciren.cargar_zonas(t.region, config)
+        except zonas_ciren.ZonasError as exc:
+            t.ndvi = {"fuente_caida": "ciren", "error": str(exc)}
+            return
+        zonas = zonas_ciren.filtrar(carga["zonas"], t.min_ha)
+        # Orden oeste-este: cada lote cubre una franja y GEE filtra menos escenas.
+        zonas.sort(key=lambda z: z["centroide"]["lon"])
+        lotes = [zonas[i:i + TAMANO_LOTE] for i in range(0, len(zonas), TAMANO_LOTE)]
+        t.lotes_total = len(lotes)
+        t.fase = "Calculando NDVI Sentinel-2 por polígono"
+        sem = asyncio.Semaphore(CONCURRENCIA_LOTES)
+        v0, v1 = rango(t.t0), rango(t.t1)
+
+        async def lote(zs: list[dict]) -> dict:
+            async with sem:
+                try:
+                    return await gee.zonal_ndvi_change(_fc(zs), v0, v1, t.cloud)
+                except gee.GeeError as exc:
+                    return {"error": str(exc).split(":")[0]}
+                finally:
+                    t.lotes_listos += 1
+
+        respuestas = await asyncio.gather(*(lote(zs) for zs in lotes))
+        valores: dict = {}
+        errores = []
+        imagenes = {"t0": 0, "t1": 0}
+        for resp in respuestas:
+            if "error" in resp:
+                errores.append(resp["error"])
+                continue
+            for k in imagenes:
+                imagenes[k] = max(imagenes[k], (resp.get("images") or {}).get(k) or 0)
+            for it in resp.get("items") or []:
+                valores[it.get("id")] = (it.get("ndvi_t0"), it.get("ndvi_t1"))
+        t.ndvi = {
+            "zonas": zonas,
+            "valores": valores,
+            "errores": errores,
+            "lotes": len(lotes),
+            "imagenes": imagenes,
+            "ventanas": {"t0": {"inicio": v0[0], "fin": v0[1]}, "t1": {"inicio": v1[0], "fin": v1[1]}},
+            "capa": {"id": carga["capa"], "anio": carga.get("anio")},
+            "poligonos_capa": len(carga["zonas"]),
+        }
+        if errores:
+            t.ttl_s = CACHE_FALLA_TTL_S
+    except Exception as exc:  # noqa: BLE001 - un trabajo nunca queda colgado en "calculando"
+        t.ndvi = {"fuente_caida": "interno", "error": type(exc).__name__}
+    finally:
+        if t.ndvi is None or "fuente_caida" in t.ndvi:
+            t.ttl_s = CACHE_FALLA_TTL_S
+        t.estado = "listo"
+        t.terminado_en = time.time()
+
+
+def _base(t: Trabajo, config: dict) -> dict:
+    return {
+        "region": t.region,
+        "region_nombre": config["nombre"],
+        "t0": t.t0,
+        "t1": t.t1,
+        "cloud": t.cloud,
+        "min_ha": t.min_ha,
+        "indice": "ndvi",
+        "umbral_delta": -cambio_vegetacion.UMBRAL_CAIDA_NDVI,
+    }
+
+
+def _respuesta(t: Trabajo, config: dict) -> dict:
+    """Arma la respuesta final; el estado SAFF se evalua aqui, con la carga en memoria."""
+    base = _base(t, config)
+    n = t.ndvi or {}
+    if "fuente_caida" in n:
+        fuente = "CIREN" if n["fuente_caida"] == "ciren" else "el cálculo"
+        return {**base, "estado": "sin_datos", "mensaje": f"{SIN_DATOS}: no respondió {fuente}.", "error": n.get("error"),
+                "resumen": None, "poligonos": []}
+
+    zonas, valores, errores = n["zonas"], n["valores"], n["errores"]
+    if errores and len(errores) == n["lotes"]:
+        sin_img = all(e == "gee_sin_imagenes" for e in errores)
+        mensaje = "Sin imagen Sentinel-2 en la ventana de t0 o t1." if sin_img else f"{SIN_DATOS}: per_api_gee no respondió."
+        gee_estado = {"estado": "sin_datos", "lotes": n["lotes"], "lotes_fallidos": len(errores), "error": errores[0]}
+    else:
+        mensaje = None
+        gee_estado = {"estado": "parcial" if errores else "ok", "lotes": n["lotes"], "lotes_fallidos": len(errores)}
+
+    puntos = ficha_punto.planes_ubicados_en_cache(config["comuna"], config["centro"])
+    if puntos is None:
+        ficha_punto.precargar_saff(config["comuna"])
+
+    con_cambio = []
+    sin_ndvi = 0
+    for z in zonas:
+        n0, n1 = valores.get(z["id"], (None, None))
+        d = cambio_vegetacion.delta(n0, n1)
+        if d is None:
+            sin_ndvi += 1
+            continue
+        if not cambio_vegetacion.hay_cambio(d):
+            continue
+        c = z["centroide"]
+        cercanos = (
+            ficha_punto.contar_cercanos(puntos, c["lat"], c["lon"], RADIO_PLANES_KM) if puntos is not None else None
+        )
+        ev = lista_negra.evaluar_cercania(cercanos, RADIO_PLANES_KM)
+        con_cambio.append({
+            "id": z["id"],
+            "uso": z.get("uso"),
+            "subuso": z.get("subuso"),
+            "superf_ha": z.get("superf_ha"),
+            "ndvi_t0": n0,
+            "ndvi_t1": n1,
+            "delta": round(d, 4),
+            "centroide": c,
+            "estado": ev.estado,
+            "motivo": ev.motivo,
+            "planes_cercanos": cercanos,
+            "geometry": z["geometry"],
+        })
+    con_cambio.sort(key=lambda p: p["delta"])
+
+    def contar(estado: str) -> int:
+        return sum(1 for p in con_cambio if p["estado"] == estado)
+
+    ha_evaluadas = sum(z.get("superf_ha") or 0 for z in zonas)
+    resumen = {
+        "poligonos_evaluados": len(zonas),
+        "ha_evaluadas": round(ha_evaluadas, 1),
+        "poligonos_capa": n["poligonos_capa"],
+        "con_ndvi": len(zonas) - sin_ndvi,
+        "sin_ndvi": sin_ndvi,
+        "con_cambio": len(con_cambio),
+        "ha_con_cambio": round(sum(p.get("superf_ha") or 0 for p in con_cambio), 1),
+        "alertas": contar(lista_negra.ESTADO_ALERTA),
+        "en_regla": contar(lista_negra.ESTADO_EN_REGLA),
+        "revisar": contar(lista_negra.ESTADO_REVISAR),
+        "sin_datos": contar(lista_negra.ESTADO_SIN_DATOS),
+    }
+    return {
+        **base,
+        "estado": "sin_datos" if gee_estado["estado"] == "sin_datos" else "listo",
+        "mensaje": mensaje,
+        "capa_ciren": n["capa"],
+        "ventanas": n["ventanas"],
+        "imagenes": n["imagenes"],
+        "gee": gee_estado,
+        "saff": {"estado": "ok" if puntos is not None else "sin_datos", "planes_ubicados": len(puntos or [])},
+        "radio_planes_km": RADIO_PLANES_KM,
+        "resumen": resumen,
+        "poligonos": con_cambio,
+    }
+
+
+def _progreso(t: Trabajo) -> dict:
+    avance = f"{t.lotes_listos}/{t.lotes_total} lotes" if t.lotes_total else "preparando"
+    return {
+        "region": t.region, "t0": t.t0, "t1": t.t1, "estado": "calculando",
+        "fase": t.fase, "avance": avance, "lotes_listos": t.lotes_listos, "lotes_total": t.lotes_total,
+        "segundos": round(time.time() - t.iniciado_en),
+    }
+
+
+async def deteccion(region: str, t0: str, t1: str, cloud: int = 40, min_ha: float = zonas_ciren.MIN_HA_DEFECTO) -> dict:
+    """Devuelve el resultado si esta listo; si no, lanza (o sigue) el calculo y entrega el avance."""
+    config = REGIONES.get(region)
+    if not config:
+        return {"region": region, "estado": "error", "error": "region_no_configurada", "regiones_disponibles": list(REGIONES)}
+    for clave in [k for k, v in _trabajos.items() if not v.vigente()]:
+        del _trabajos[clave]
+    clave = (region, t0, t1, cloud, min_ha)
+    t = _trabajos.get(clave)
+    if t is None:
+        t = Trabajo(region, t0, t1, cloud, min_ha)
+        _trabajos[clave] = t
+        t.tarea = asyncio.create_task(_calcular(t, config))
+        await asyncio.sleep(0)
+    if t.estado == "calculando":
+        return _progreso(t)
+    return {**_respuesta(t, config), "calculado_en": t.terminado_en}
 
 
 def info_regiones() -> list[dict]:
-    return [
-        {
+    salida = []
+    for clave, cfg in REGIONES.items():
+        carga = zonas_ciren.zonas_en_cache(clave)
+        salida.append({
             "id": clave,
             "nombre": cfg["nombre"],
-            "puntos": len(cfg["puntos"]),
             "comuna": cfg["comuna"],
             "ciren_layer": cfg["ciren_layer"],
             "ciren_anio": cfg["ciren_anio"],
             "centro": {"lat": cfg["centro"][0], "lon": cfg["centro"][1]},
             "bbox": list(cfg["bbox"]),
-        }
-        for clave, cfg in REGIONES_PILOTO.items()
-    ]
+            "poligonos_ciren": len(carga["zonas"]) if carga else None,
+            "min_ha": zonas_ciren.MIN_HA_DEFECTO,
+        })
+    return salida

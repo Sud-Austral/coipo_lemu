@@ -45,9 +45,11 @@
         <div class="grupo">
           <div class="grupo-titulo">Imagen base</div>
           <div class="segmentado" role="radiogroup" aria-label="Imagen base">
-            <button type="button" data-base="sat" class="activo" aria-pressed="true">Satélite</button>
+            <button type="button" data-base="google" class="activo" aria-pressed="true">Google</button>
+            <button type="button" data-base="sat" aria-pressed="false">Esri</button>
             <button type="button" data-base="osm" aria-pressed="false">Mapa</button>
           </div>
+          <div class="muted chico">Detalle: Google (piloto interno). Detección: Sentinel-2.</div>
         </div>
 
         <div class="grupo">
@@ -90,22 +92,28 @@
   <aside class="panel">
     <section class="tarjeta">
       <h2>Resultados</h2>
-      <div id="resumen" class="resumen" hidden>
-        <div class="stat"><div class="num" id="num-evaluados">0</div><div class="etq">Evaluados</div></div>
-        <div class="stat alerta"><div class="num" id="num-alertas">0</div><div class="etq">Alertas</div></div>
-        <div class="stat revisar"><div class="num" id="num-revisar">0</div><div class="etq">Revisar</div></div>
+      <div id="resumen" hidden>
+        <p class="resumen-texto" id="resumen-texto"></p>
+        <div class="resumen">
+          <div class="stat"><div class="num" id="num-cambio">0</div><div class="etq">Con cambio</div></div>
+          <div class="stat alerta"><div class="num" id="num-alertas">0</div><div class="etq">Alertas</div></div>
+          <div class="stat revisar"><div class="num" id="num-revisar">0</div><div class="etq">Revisar</div></div>
+          <div class="stat en_regla"><div class="num" id="num-en-regla">0</div><div class="etq">En regla</div></div>
+          <div class="stat revisar"><div class="num" id="num-sin-datos">0</div><div class="etq">Sin datos</div></div>
+        </div>
       </div>
       <div id="lista" class="lista"><p class="msg">Elige región y fechas, luego presiona «Detectar cambios».</p></div>
     </section>
 
     <section class="tarjeta" id="ficha" hidden>
-      <h2 id="ficha-titulo">Ficha del punto</h2>
+      <h2 id="ficha-titulo">Ficha del polígono</h2>
       <div id="ficha-cuerpo"></div>
     </section>
 
-    <p class="nota">Índice: NDVI Sentinel-2. Una caída fuerte entre t0 y t1 puede indicar corta, pero también sequía o
-      estacionalidad; por eso se filtra con uso de suelo CIREN y se cruza con planes de manejo SAFF y rodales SIGCRA
-      antes de marcar una alerta.</p>
+    <p class="nota">Se evalúa cada polígono de bosque CIREN de la comuna con el NDVI Sentinel-2 medio en t0 y t1;
+      hay cambio si el NDVI cae 0,15 o más. Una caída fuerte puede indicar corta, pero también sequía o estacionalidad;
+      por eso se cruza el centroide del polígono con planes de manejo SAFF (a 3 km) y, al abrir la ficha, con los
+      rodales SIGCRA antes de marcar una alerta.</p>
   </aside>
 </main>
 

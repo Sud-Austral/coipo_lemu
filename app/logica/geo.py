@@ -88,6 +88,83 @@ def _en_poligono(lon: float, lat: float, anillos: list) -> bool:
     return not any(_en_anillo(lon, lat, hoyo) for hoyo in anillos[1:])
 
 
+def _poligonos(geometria: dict | None) -> list:
+    if not geometria:
+        return []
+    if geometria.get("type") == "Polygon":
+        return [geometria.get("coordinates") or []]
+    if geometria.get("type") == "MultiPolygon":
+        return geometria.get("coordinates") or []
+    return []
+
+
+def _area_centroide_anillo(anillo: list) -> tuple[float, float, float]:
+    """Area con signo (grados^2) y centroide de un anillo (formula del shoelace)."""
+    a = cx = cy = 0.0
+    for i in range(len(anillo) - 1):
+        x0, y0 = anillo[i][0], anillo[i][1]
+        x1, y1 = anillo[i + 1][0], anillo[i + 1][1]
+        cruz = x0 * y1 - x1 * y0
+        a += cruz
+        cx += (x0 + x1) * cruz
+        cy += (y0 + y1) * cruz
+    a /= 2
+    if a == 0:
+        return 0.0, anillo[0][0], anillo[0][1]
+    return a, cx / (6 * a), cy / (6 * a)
+
+
+def bbox(geometria: dict | None) -> tuple[float, float, float, float] | None:
+    """(oeste, sur, este, norte) de un Polygon/MultiPolygon."""
+    xs = [p[0] for poli in _poligonos(geometria) for anillo in poli for p in anillo]
+    ys = [p[1] for poli in _poligonos(geometria) for anillo in poli for p in anillo]
+    if not xs:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def centroide(geometria: dict | None) -> tuple[float, float] | None:
+    """(lon, lat) del centroide de area (los hoyos restan).
+
+    Si el centroide cae fuera del poligono (formas en C o con hoyos) se usa un
+    punto interior: el medio del tramo interior mas largo sobre la horizontal
+    del centroide. Asi el cruce con rodales siempre evalua un punto del bosque.
+    """
+    area = sx = sy = 0.0
+    for poli in _poligonos(geometria):
+        for k, anillo in enumerate(poli):
+            if len(anillo) < 4:
+                continue
+            a, cx, cy = _area_centroide_anillo(anillo)
+            a = abs(a) if k == 0 else -abs(a)
+            area += a
+            sx += cx * a
+            sy += cy * a
+    if area <= 0:
+        caja = bbox(geometria)
+        return ((caja[0] + caja[2]) / 2, (caja[1] + caja[3]) / 2) if caja else None
+    lon, lat = sx / area, sy / area
+    if punto_en_geometria(lon, lat, geometria):
+        return lon, lat
+    return _punto_interior(geometria, lat) or (lon, lat)
+
+
+def _punto_interior(geometria: dict, lat: float) -> tuple[float, float] | None:
+    cortes = []
+    for poli in _poligonos(geometria):
+        for anillo in poli:
+            for i in range(len(anillo) - 1):
+                (x0, y0), (x1, y1) = anillo[i][:2], anillo[i + 1][:2]
+                if (y0 > lat) != (y1 > lat):
+                    cortes.append(x0 + (lat - y0) * (x1 - x0) / (y1 - y0))
+    cortes.sort()
+    tramos = [(cortes[i], cortes[i + 1]) for i in range(0, len(cortes) - 1, 2)]
+    if not tramos:
+        return None
+    a, b = max(tramos, key=lambda t: t[1] - t[0])
+    return (a + b) / 2, lat
+
+
 def punto_en_geometria(lon: float, lat: float, geometria: dict | None) -> bool:
     """True si (lon, lat) cae dentro de un GeoJSON Polygon/MultiPolygon."""
     if not geometria:

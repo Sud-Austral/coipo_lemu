@@ -42,11 +42,13 @@ select:focus, input:focus, button:focus-visible, summary:focus-visible{outline:2
 
 .tarjeta{background:#fff; border:1px solid var(--borde); border-radius:12px; padding:16px;}
 .tarjeta h2{font-size:15px; margin-bottom:10px;}
-.resumen{display:flex; gap:10px; margin-bottom:12px;}
-.stat{flex:1; background:var(--fondo); border-radius:10px; padding:10px; text-align:center;}
+.resumen{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;}
+.resumen-texto{font-size:13px; line-height:1.45; margin-bottom:10px;}
+.stat{flex:1 1 80px; background:var(--fondo); border-radius:10px; padding:10px; text-align:center;}
 .stat .num{font-size:24px; font-weight:800;}
 .stat.alerta .num{color:var(--rojo);}
 .stat.revisar .num{color:var(--ambar);}
+.stat.en_regla .num{color:var(--verde);}
 .stat .etq{font-size:11px; color:var(--gris);}
 .msg{color:var(--gris); padding:18px 4px; text-align:center;}
 
@@ -61,17 +63,13 @@ select:focus, input:focus, button:focus-visible, summary:focus-visible{outline:2
 .coords{font-family:ui-monospace,Consolas,monospace; font-size:12px; color:var(--gris);}
 .ndvi b{font-weight:700;}
 .motivo{font-size:12px; color:var(--gris);}
+.ver-mas{align-self:center; margin-top:4px;}
 
 .chip{display:inline-block; font-size:11px; font-weight:700; padding:2px 9px; border-radius:999px;
   background:var(--verde-claro); color:var(--verde-hover);}
 .chip.alerta{background:#fbe3e0; color:var(--rojo);}
 .chip.sin_datos,.chip.revisar{background:var(--ambar-claro); color:#8a5a12;}
 .chip.sin_cambio,.chip.descartado_no_forestal{background:#eef1ef; color:var(--gris);}
-
-/* Marcadores HTML */
-.marcador{width:26px; height:26px; border-radius:50%; border:2px solid #fff; color:#fff; font-weight:700; font-size:12px;
-  display:flex; align-items:center; justify-content:center; box-shadow:0 1px 4px rgba(0,0,0,.45); cursor:pointer;}
-.marcador.sel{width:32px; height:32px; font-size:14px; box-shadow:0 0 0 3px var(--verde-claro),0 0 0 5px var(--verde);}
 
 /* Controles flotantes del mapa */
 .capas{position:absolute; top:10px; left:10px; z-index:2; width:250px; max-height:calc(100% - 20px); overflow:auto;
@@ -86,7 +84,7 @@ select:focus, input:focus, button:focus-visible, summary:focus-visible{outline:2
 .rango input{flex:1; accent-color:var(--verde);}
 .rango output{width:38px; text-align:right;}
 .segmentado{display:flex; border:1px solid var(--borde); border-radius:999px; overflow:hidden;}
-.segmentado button{flex:1; border:none; background:#fff; padding:5px 8px; font:inherit; font-size:12px; cursor:pointer; color:var(--texto);}
+.segmentado button{flex:1; border:none; background:#fff; padding:5px 6px; font:inherit; font-size:12px; cursor:pointer; color:var(--texto);}
 .segmentado button + button{border-left:1px solid var(--borde);}
 .segmentado button.activo{background:var(--verde); color:#fff;}
 .segmentado button:disabled{color:#a9b3ad; cursor:default;}

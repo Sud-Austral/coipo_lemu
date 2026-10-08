@@ -4,6 +4,9 @@ const CIREN_URL = 'https://esri.ciren.cl/server/rest/services/USOS_DE_LA_TIERRA_
 const WAYBACK_CONFIG_URL = 'https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json';
 const SIN_DATOS = 'Sin datos por el momento';
 const ZOOM_MEJORAR = 14;
+const POLL_MS = 5000;
+const PAGINA = 50;
+const VACIO = { type: 'FeatureCollection', features: [] };
 
 const ESTADOS = {
   alerta: { etq: 'Alerta', color: '#c0392b' },
@@ -20,9 +23,10 @@ const estado = {
   regiones: {},
   region: null,
   consulta: null,       // {region, t0, t1, cloud} de la última detección
-  resultados: [],
+  resultados: [],       // polígonos con cambio (orden del backend: delta más negativo primero)
+  mostrados: 0,
   sel: null,
-  marcadores: [],
+  deteccion: 0,         // id de la detección en curso (cancela el polling anterior)
   ndviModo: '',
   sentinel: {},         // clave region|t0|t1 -> respuesta del backend
   wayback: { config: null, capturas: [], a: 0, b: 1, viendo: 'a', comparar: false },
@@ -64,12 +68,36 @@ async function getJSON(url) {
 
 /* ---------- mapa ---------- */
 
+// Bing no usa {z}/{x}/{y} sino quadkey: el protocolo bing://z/x/y lo convierte.
+function quadkey(z, x, y) {
+  let q = '';
+  for (let i = z; i > 0; i -= 1) {
+    const m = 1 << (i - 1);
+    q += String((x & m ? 1 : 0) + (y & m ? 2 : 0));
+  }
+  return q;
+}
+
+maplibregl.addProtocol('bing', async (params, abort) => {
+  const [z, x, y] = params.url.replace('bing://', '').split('/').map(Number);
+  const resp = await fetch(`https://ecn.t${(x + y) % 4}.tiles.virtualearth.net/tiles/a${quadkey(z, x, y)}.jpeg?g=14000`, { signal: abort.signal });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return { data: await resp.arrayBuffer() };
+});
+
+const COLOR_ESTADO = ['match', ['get', 'estado'],
+  'alerta', '#c0392b', 'en_regla', '#0b6b3a', 'revisar', '#d4a017', 'sin_datos', '#d4a017', '#5d6b62'];
+
+// Vista compartible: #zoom/lat/lon (hash de MapLibre) y ?base=sat|bing|google|osm.
+let vistaEnUrl = /^#\d/.test(window.location.hash);
+
 const map = new maplibregl.Map({
   container: 'map',
   attributionControl: false,
   center: [-72.2, -39.64],
   zoom: 9,
-  maxZoom: 19,
+  maxZoom: 20,
+  hash: true,
   style: {
     version: 8,
     sources: {
@@ -77,6 +105,16 @@ const map = new maplibregl.Map({
         type: 'raster', tileSize: 256, maxzoom: 19,
         tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
         attribution: 'Imagen © Esri, Maxar, Earthstar Geographics',
+      },
+      bing: {
+        type: 'raster', tileSize: 256, maxzoom: 20,
+        tiles: ['bing://{z}/{x}/{y}'],
+        attribution: 'Imagen © Microsoft (Bing Maps)',
+      },
+      google: {
+        type: 'raster', tileSize: 256, maxzoom: 20,
+        tiles: [0, 1, 2, 3].map((n) => `https://mt${n}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}`),
+        attribution: 'Imágenes © Google',
       },
       osm: {
         type: 'raster', tileSize: 256, maxzoom: 19,
@@ -87,16 +125,25 @@ const map = new maplibregl.Map({
         type: 'raster', tileSize: 256, maxzoom: 19,
         tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
       },
+      cambios: { type: 'geojson', data: VACIO },
       rodales: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       referencias: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
     },
     layers: [
-      { id: 'base-sat', type: 'raster', source: 'sat' },
+      { id: 'base-sat', type: 'raster', source: 'sat', layout: { visibility: 'none' } },
+      { id: 'base-bing', type: 'raster', source: 'bing', layout: { visibility: 'none' } },
+      { id: 'base-google', type: 'raster', source: 'google' },
       { id: 'base-osm', type: 'raster', source: 'osm', layout: { visibility: 'none' } },
       // Wayback se inserta aquí (antes de 'tope-base'); NDVI y CIREN antes de 'tope-capas'.
       { id: 'tope-base', type: 'background', paint: { 'background-opacity': 0 } },
       { id: 'tope-capas', type: 'background', paint: { 'background-opacity': 0 } },
       { id: 'rotulos', type: 'raster', source: 'rotulos' },
+      { id: 'cambios-relleno', type: 'fill', source: 'cambios', paint: { 'fill-color': COLOR_ESTADO, 'fill-opacity': 0.35 } },
+      { id: 'cambios-borde', type: 'line', source: 'cambios', paint: { 'line-color': COLOR_ESTADO, 'line-width': ['interpolate', ['linear'], ['zoom'], 9, 1, 15, 2.5] } },
+      {
+        id: 'cambios-sel', type: 'line', source: 'cambios', filter: ['==', ['get', 'i'], -1],
+        paint: { 'line-color': '#ffffff', 'line-width': 4, 'line-dasharray': [2, 1] },
+      },
       { id: 'rodales-relleno', type: 'fill', source: 'rodales', paint: { 'fill-color': '#7fdc9a', 'fill-opacity': 0.15 } },
       { id: 'rodales-borde', type: 'line', source: 'rodales', paint: { 'line-color': '#7fdc9a', 'line-width': 2 } },
       {
@@ -125,9 +172,8 @@ document.querySelectorAll('[data-base]').forEach((btn) => btn.addEventListener('
     b.classList.toggle('activo', b === btn);
     b.setAttribute('aria-pressed', String(b === btn));
   });
-  map.setLayoutProperty('base-sat', 'visibility', base === 'sat' ? 'visible' : 'none');
-  map.setLayoutProperty('base-osm', 'visibility', base === 'osm' ? 'visible' : 'none');
-  map.setLayoutProperty('rotulos', 'visibility', base === 'sat' ? 'visible' : 'none');
+  ['sat', 'bing', 'google', 'osm'].forEach((b) => map.setLayoutProperty(`base-${b}`, 'visibility', base === b ? 'visible' : 'none'));
+  map.setLayoutProperty('rotulos', 'visibility', base === 'osm' ? 'none' : 'visible');
 }));
 
 /* ---------- CIREN ---------- */
@@ -175,7 +221,7 @@ async function cargarLeyendaCiren(layerId) {
 let ignorarClickHasta = 0;
 map.on('click', async (ev) => {
   if (Date.now() < ignorarClickHasta || !$('ciren-on').checked || !estado.region) return;
-  if (map.getLayer('referencias') && map.queryRenderedFeatures(ev.point, { layers: ['referencias'] }).length) return;
+  if (map.queryRenderedFeatures(ev.point, { layers: ['referencias', 'cambios-relleno'] }).length) return;
   const { lng, lat } = ev.lngLat;
   const popup = new maplibregl.Popup({ maxWidth: '280px' }).setLngLat(ev.lngLat).setHTML('<span class="muted">Consultando CIREN…</span>').addTo(map);
   try {
@@ -272,7 +318,7 @@ async function cargarRegiones() {
   try {
     const data = await getJSON('api/v1/regiones');
     data.items.forEach((r) => { estado.regiones[r.id] = r; });
-    sel.innerHTML = data.items.map((r) => `<option value="${esc(r.id)}">${esc(r.nombre)} (${r.puntos} puntos piloto)</option>`).join('');
+    sel.innerHTML = data.items.map((r) => `<option value="${esc(r.id)}">${esc(r.nombre)}</option>`).join('');
   } catch (err) {
     sel.innerHTML = `<option value="">${SIN_DATOS}</option>`;
     return;
@@ -289,59 +335,94 @@ function cambiarRegion() {
   ponerCapaCiren(r.ciren_layer);
   cargarLeyendaCiren(r.ciren_layer);
   const [w, s, e, n] = r.bbox;
-  map.fitBounds([[w, s], [e, n]], { padding: 20, animate: false });
+  if (!vistaEnUrl) map.fitBounds([[w, s], [e, n]], { padding: 20, animate: false });
+  vistaEnUrl = false;
   if (estado.ndviModo) aplicarNdvi(estado.ndviModo);
 }
 
 $('region').addEventListener('change', cambiarRegion);
 ['t0', 't1'].forEach((id) => $(id).addEventListener('change', () => { if (estado.ndviModo) aplicarNdvi(estado.ndviModo); }));
 
-/* ---------- detección y lista de puntos ---------- */
-
-function limpiarMarcadores() {
-  estado.marcadores.forEach((m) => m.remove());
-  estado.marcadores = [];
-}
+/* ---------- detección y lista de polígonos ---------- */
 
 function estadoDe(r) {
-  return (r.lista_negra && r.lista_negra.estado) || 'sin_datos';
+  return r.estado || 'sin_datos';
 }
 
 function f3(v) {
   return v === null || v === undefined ? '—' : Number(v).toLocaleString('es-CL', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
-function tarjetaPunto(r, i) {
+function geojsonCambios() {
+  return {
+    type: 'FeatureCollection',
+    features: estado.resultados.map((r, i) => ({ type: 'Feature', geometry: r.geometry, properties: { i, id: r.id, estado: estadoDe(r) } })),
+  };
+}
+
+function pintarCambiosMapa() {
+  if (map.getSource('cambios')) map.getSource('cambios').setData(geojsonCambios());
+}
+
+function tarjetaPoligono(r, i) {
   const e = estadoDe(r);
   const inf = infoEstado(e);
-  const uso = r.uso_suelo && (r.uso_suelo.subuso || r.uso_suelo.uso);
-  const motivo = r.lista_negra && r.lista_negra.motivo;
   const el = document.createElement('button');
   el.type = 'button';
-  el.className = 'punto';
+  el.className = `punto${estado.sel === i ? ' sel' : ''}`;
   el.dataset.i = i;
   el.innerHTML = `
     <span class="n" style="background:${inf.color}">${i + 1}</span>
-    <span class="fila"><span class="chip ${esc(e)}">${esc(inf.etq)}</span><span class="coords">${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}</span></span>
-    <span class="fila ndvi">NDVI t0 <b>${f3(r.ndvi_t0)}</b> · t1 <b>${f3(r.ndvi_t1)}</b> · Δ <b style="color:${r.cambio_detectado ? '#c0392b' : 'inherit'}">${f3(r.delta_ndvi)}</b></span>
-    <span class="fila motivo">${uso ? `CIREN: ${esc(uso)}` : ''}${uso && motivo ? ' · ' : ''}${motivo ? esc(motivo) : ''}</span>`;
+    <span class="fila"><span class="chip ${esc(e)}">${esc(inf.etq)}</span><b>${esc(r.subuso || r.uso || 'Bosque')}</b><span class="muted">${ha(r.superf_ha)}</span><span class="coords">CIREN ${esc(r.id)}</span></span>
+    <span class="fila ndvi">NDVI t0 <b>${f3(r.ndvi_t0)}</b> · t1 <b>${f3(r.ndvi_t1)}</b> · Δ <b style="color:#c0392b">${f3(r.delta)}</b></span>
+    <span class="fila motivo">${esc(r.motivo || '')}</span>`;
   el.addEventListener('click', () => seleccionar(i));
   return el;
 }
 
-function marcadorPunto(r, i) {
-  const inf = infoEstado(estadoDe(r));
-  const el = document.createElement('div');
-  el.className = 'marcador';
-  el.style.background = inf.color;
-  el.textContent = String(i + 1);
-  el.title = `Punto ${i + 1}: ${inf.etq}`;
-  el.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    ignorarClickHasta = Date.now() + 400;
-    seleccionar(i);
-  });
-  return new maplibregl.Marker({ element: el }).setLngLat([r.lon, r.lat]).addTo(map);
+function pintarLista() {
+  const lista = $('lista');
+  lista.innerHTML = '';
+  estado.resultados.slice(0, estado.mostrados).forEach((r, i) => lista.appendChild(tarjetaPoligono(r, i)));
+  const resto = estado.resultados.length - estado.mostrados;
+  if (resto > 0) {
+    const mas = document.createElement('button');
+    mas.type = 'button';
+    mas.className = 'btn-secundario ver-mas';
+    mas.textContent = `Ver más (${resto.toLocaleString('es-CL')} restantes)`;
+    mas.addEventListener('click', () => { estado.mostrados += PAGINA; pintarLista(); });
+    lista.appendChild(mas);
+  }
+}
+
+function actualizarConteos() {
+  const contar = (e) => estado.resultados.filter((r) => estadoDe(r) === e).length;
+  $('num-cambio').textContent = estado.resultados.length.toLocaleString('es-CL');
+  $('num-alertas').textContent = contar('alerta').toLocaleString('es-CL');
+  $('num-revisar').textContent = contar('revisar').toLocaleString('es-CL');
+  $('num-en-regla').textContent = contar('en_regla').toLocaleString('es-CL');
+  $('num-sin-datos').textContent = contar('sin_datos').toLocaleString('es-CL');
+}
+
+function textoResumen(d) {
+  const s = d.resumen;
+  const partes = [`Se evaluaron ${s.poligonos_evaluados.toLocaleString('es-CL')} polígonos de bosque CIREN (${num(s.ha_evaluadas, 0)} ha) de ${num(d.min_ha)} ha o más.`];
+  if (d.ventanas) {
+    partes.push(`NDVI Sentinel-2: t0 ${fechaCL(d.ventanas.t0.inicio)} a ${fechaCL(d.ventanas.t0.fin)}, t1 ${fechaCL(d.ventanas.t1.inicio)} a ${fechaCL(d.ventanas.t1.fin)}.`);
+  }
+  if (s.con_cambio) partes.push(`${s.con_cambio.toLocaleString('es-CL')} con caída de NDVI ≥ 0,15 (${num(s.ha_con_cambio, 0)} ha).`);
+  if (s.sin_ndvi) partes.push(`${s.sin_ndvi.toLocaleString('es-CL')} sin NDVI (nubes, sin imagen o sin respuesta de GEE).`);
+  if (d.gee?.estado === 'parcial') partes.push(`per_api_gee no respondió en ${d.gee.lotes_fallidos} de ${d.gee.lotes} lotes.`);
+  if (d.saff?.estado !== 'ok') partes.push(`SAFF: ${SIN_DATOS} (se está cargando); los cambios quedan «sin datos».`);
+  return partes.join(' ');
+}
+
+const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
+
+function limpiarResultados() {
+  estado.resultados = [];
+  estado.mostrados = 0;
+  pintarCambiosMapa();
 }
 
 async function detectar(ev) {
@@ -352,64 +433,109 @@ async function detectar(ev) {
     lista.innerHTML = '<p class="msg">La fecha t0 debe ser anterior a t1.</p>';
     return;
   }
+  const id = ++estado.deteccion;
   $('btn-detectar').disabled = true;
   $('resumen').hidden = true;
-  lista.innerHTML = '<p class="msg">Calculando NDVI y cruzando fuentes…</p>';
-  limpiarMarcadores();
+  lista.innerHTML = '<p class="msg">Calculando NDVI por polígono y cruzando fuentes…</p>';
   deseleccionar();
+  limpiarResultados();
+  const url = `api/v1/deteccion?region=${encodeURIComponent(c.region)}&t0=${c.t0}&t1=${c.t1}&cloud=${c.cloud}`;
   try {
-    const resp = await fetch(`api/v1/deteccion?region=${encodeURIComponent(c.region)}&t0=${c.t0}&t1=${c.t1}&cloud=${c.cloud}`);
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok || data.error) {
-      lista.innerHTML = `<p class="msg">No se pudo calcular: ${esc(data.error || data.detail || `HTTP ${resp.status}`)}</p>`;
-      return;
+    let data;
+    for (;;) {
+      const resp = await fetch(url);
+      data = await resp.json().catch(() => ({}));
+      if (id !== estado.deteccion) return;
+      if (!resp.ok) {
+        lista.innerHTML = `<p class="msg">No se pudo calcular: ${esc(data.detail || `HTTP ${resp.status}`)}</p>`;
+        return;
+      }
+      if (data.estado !== 'calculando') break;
+      lista.innerHTML = `<p class="msg">${esc(data.fase)}… <b>${esc(data.avance)}</b> · ${data.segundos ?? 0} s</p>`;
+      await esperar(POLL_MS);
+      if (id !== estado.deteccion) return;
     }
     estado.consulta = c;
-    estado.resultados = data.resultados || [];
-    $('num-evaluados').textContent = data.puntos_evaluados ?? 0;
-    $('num-alertas').textContent = data.alertas ?? 0;
-    $('num-revisar').textContent = data.revisar ?? 0;
-    $('resumen').hidden = false;
-    if (!estado.resultados.length) {
-      lista.innerHTML = '<p class="msg">Sin resultados para este rango.</p>';
+    if (!data.resumen) {
+      lista.innerHTML = `<p class="msg">${esc(data.mensaje || SIN_DATOS)}</p>`;
       return;
     }
-    lista.innerHTML = '';
-    estado.resultados.forEach((r, i) => {
-      lista.appendChild(tarjetaPunto(r, i));
-      estado.marcadores.push(marcadorPunto(r, i));
-    });
-    const b = new maplibregl.LngLatBounds();
-    estado.resultados.forEach((r) => b.extend([r.lon, r.lat]));
-    map.fitBounds(b, { padding: 80, maxZoom: 13 });
+    estado.resultados = data.poligonos || [];
+    estado.mostrados = PAGINA;
+    $('resumen-texto').textContent = textoResumen(data);
+    actualizarConteos();
+    $('resumen').hidden = false;
+    pintarCambiosMapa();
+    if (data.estado === 'sin_datos') {
+      lista.innerHTML = `<p class="msg">${esc(data.mensaje || SIN_DATOS)}</p>`;
+      return;
+    }
+    if (!estado.resultados.length) {
+      lista.innerHTML = '<p class="msg">Ningún polígono de bosque con caída de NDVI en este rango.</p>';
+      return;
+    }
+    pintarLista();
   } catch (err) {
-    lista.innerHTML = `<p class="msg">${SIN_DATOS} (error de conexión).</p>`;
+    if (id === estado.deteccion) lista.innerHTML = `<p class="msg">${SIN_DATOS} (error de conexión).</p>`;
   } finally {
-    $('btn-detectar').disabled = false;
+    if (id === estado.deteccion) $('btn-detectar').disabled = false;
   }
 }
 
 $('form-controles').addEventListener('submit', detectar);
 
+map.on('click', 'cambios-relleno', (ev) => {
+  ignorarClickHasta = Date.now() + 400;
+  const i = ev.features[0].properties.i;
+  if (Number.isInteger(i)) seleccionar(i);
+});
+map.on('mouseenter', 'cambios-relleno', () => { map.getCanvas().style.cursor = 'pointer'; });
+map.on('mouseleave', 'cambios-relleno', () => { map.getCanvas().style.cursor = ''; });
+
 /* ---------- selección y ficha ---------- */
 
 function deseleccionar() {
   estado.sel = null;
+  if (map.getLayer('cambios-sel')) map.setFilter('cambios-sel', ['==', ['get', 'i'], -1]);
   $('ficha').hidden = true;
   limpiarFichaMapa();
   cerrarWayback();
   actualizarBotonMejorar();
 }
 
+function cajaGeometria(g) {
+  const polis = g.type === 'MultiPolygon' ? g.coordinates : [g.coordinates];
+  const b = new maplibregl.LngLatBounds();
+  polis.forEach((p) => p[0].forEach((pt) => b.extend(pt)));
+  return b;
+}
+
 function seleccionar(i) {
   const r = estado.resultados[i];
   if (!r) return;
+  if (i >= estado.mostrados) {
+    estado.mostrados = Math.ceil((i + 1) / PAGINA) * PAGINA;
+    pintarLista();
+  }
   estado.sel = i;
   document.querySelectorAll('.punto').forEach((el) => el.classList.toggle('sel', Number(el.dataset.i) === i));
-  estado.marcadores.forEach((m, j) => m.getElement().classList.toggle('sel', j === i));
+  const tarjeta = document.querySelector(`.punto[data-i="${i}"]`);
+  if (tarjeta) tarjeta.scrollIntoView({ block: 'nearest' });
+  map.setFilter('cambios-sel', ['==', ['get', 'i'], i]);
   cerrarWayback();
-  map.flyTo({ center: [r.lon, r.lat], zoom: 16 });
+  map.fitBounds(cajaGeometria(r.geometry), { padding: 60, maxZoom: 17 });
   cargarFicha(i);
+}
+
+function actualizarEstado(i, est) {
+  const r = estado.resultados[i];
+  if (!r || !est?.estado) return;
+  r.estado = est.estado;
+  r.motivo = est.motivo;
+  pintarCambiosMapa();
+  actualizarConteos();
+  const vieja = document.querySelector(`.punto[data-i="${i}"]`);
+  if (vieja) vieja.replaceWith(tarjetaPoligono(r, i));
 }
 
 function limpiarFichaMapa() {
@@ -457,31 +583,33 @@ async function cargarFicha(i) {
   const r = estado.resultados[i];
   const pedido = ++estado.fichaPedido;
   $('ficha').hidden = false;
-  $('ficha-titulo').textContent = `Ficha del punto ${i + 1}`;
+  $('ficha-titulo').textContent = `Ficha del polígono ${i + 1} · CIREN ${r.id}`;
   const cuerpo = $('ficha-cuerpo');
-  cuerpo.innerHTML = '<p class="msg">Buscando planes de manejo (SAFF) y rodales (SIGCRA)…</p>';
+  cuerpo.innerHTML = '<p class="msg">Buscando planes de manejo (SAFF) y rodales (SIGCRA) desde el centroide…</p>';
   limpiarFichaMapa();
   $('ficha').scrollIntoView({ block: 'nearest' });
   const c = estado.consulta || consultaActual();
   let f;
   try {
-    f = await getJSON(`api/v1/punto/ficha?region=${encodeURIComponent(c.region)}&lat=${r.lat}&lon=${r.lon}&radio_km=3&t1=${c.t1}`);
+    f = await getJSON(`api/v1/punto/ficha?region=${encodeURIComponent(c.region)}&lat=${r.centroide.lat}&lon=${r.centroide.lon}&radio_km=3&t1=${c.t1}`);
   } catch (err) {
     if (pedido === estado.fichaPedido) cuerpo.innerHTML = `<p class="aviso">${SIN_DATOS}: no se pudo consultar la ficha.</p>`;
     return;
   }
   if (pedido !== estado.fichaPedido) return;
+  actualizarEstado(i, f.estado_cambio);
 
   const avisos = [];
   if (f.sigcra?.estado === 'sin_datos') avisos.push(`SIGCRA (rodales): ${SIN_DATOS}.`);
   if (f.sigcra?.estado === 'parcial') avisos.push('SIGCRA respondió solo para algunos planes.');
   if (f.saff?.truncado) avisos.push('La carga SAFF llegó al máximo de páginas; podría faltar algún plan.');
-  const ln = r.lista_negra || {};
 
   cuerpo.innerHTML = `
     <div class="conclusion ${claseConclusion(f)}">${esc(f.conclusion)}</div>
     ${avisos.map((a) => `<p class="aviso">${esc(a)}</p>`).join('')}
-    <p class="chico muted">Estado de la detección: <span class="chip ${esc(estadoDe(r))}">${esc(infoEstado(estadoDe(r)).etq)}</span>${ln.motivo ? ` ${esc(ln.motivo)}` : ''}</p>
+    <p class="chico muted">Estado del cambio: <span class="chip ${esc(estadoDe(r))}">${esc(infoEstado(estadoDe(r)).etq)}</span>${r.motivo ? ` ${esc(r.motivo)}` : ''}</p>
+    <p class="chico muted">${esc(r.subuso || r.uso || 'Bosque')} · ${ha(r.superf_ha)} · NDVI ${f3(r.ndvi_t0)} → ${f3(r.ndvi_t1)} (Δ ${f3(r.delta)}).
+      Centroide ${r.centroide.lat.toFixed(5)}, ${r.centroide.lon.toFixed(5)}: el cruce con rodales se evalúa en ese punto.</p>
     <p class="chico muted">${esc(f.nota_cercania)}${f.saff?.periodo ? ` Planes con resolución entre ${fechaCL(f.saff.periodo.desde)} y ${fechaCL(f.saff.periodo.hasta)}.` : ''}</p>
     <div class="planes">${(f.planes || []).map(tarjetaPlan).join('')}</div>`;
 
@@ -620,7 +748,8 @@ async function mejorarImagen() {
   try {
     const lista = await configWayback();
     const versiones = versionesRelevantes(lista, c.t0, c.t1);
-    const capturas = (await Promise.all(versiones.map((v) => capturaEnPunto(v, r.lon, r.lat).catch(() => null)))).filter(Boolean);
+    const { lat, lon } = r.centroide;
+    const capturas = (await Promise.all(versiones.map((v) => capturaEnPunto(v, lon, lat).catch(() => null)))).filter(Boolean);
     const unicas = [...new Map(capturas.map((x) => [x.fecha, x])).values()].sort((a, b) => a.fecha.localeCompare(b.fecha));
     if (estado.sel !== sel || $('wayback').hidden) return;
     w.capturas = unicas;
@@ -649,4 +778,13 @@ $('wayback-volver').addEventListener('click', cerrarWayback);
 /* ---------- inicio ---------- */
 
 if (window.matchMedia('(max-width: 900px)').matches) $('capas').open = false;
+mapaListo.then(() => {
+  const params = new URLSearchParams(window.location.search);
+  const btn = params.get('base') && document.querySelector(`[data-base="${CSS.escape(params.get('base'))}"]`);
+  if (btn) btn.click();
+  if (params.get('ciren') === '0') {
+    $('ciren-on').checked = false;
+    $('ciren-on').dispatchEvent(new Event('change'));
+  }
+});
 cargarRegiones();

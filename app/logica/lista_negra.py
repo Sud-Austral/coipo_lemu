@@ -1,6 +1,8 @@
 """Decide el estado de un cambio forestal cruzando SAFF (planes) y SIGCRA (rodales).
 
-Regla (solo se aplica a puntos con caida de NDVI en uso forestal CIREN):
+Se aplica al centroide de cada poligono de bosque CIREN con caida de NDVI.
+El listado usa evaluar_cercania (solo SAFF en memoria); la ficha usa
+evaluar_ficha (con rodales SIGCRA):
 - sin_datos: SAFF no respondio, o SIGCRA no respondio para los planes cercanos
   y por eso no se puede confirmar el cruce.
 - en_regla: el punto cae dentro de un rodal SIGCRA de un plan con resolucion
@@ -27,6 +29,23 @@ class ResultadoListaNegra:
 
     def to_dict(self) -> dict:
         return {"estado": self.estado, "motivo": self.motivo, "plan_manejo": self.plan_manejo}
+
+
+def evaluar_cercania(planes_cercanos: int | None, radio_km: float) -> ResultadoListaNegra:
+    """Estado preliminar del listado, solo con la carga SAFF en memoria (sin SIGCRA).
+
+    None = SAFF aun no cargado o caido. Con planes cercanos queda «revisar»
+    hasta abrir la ficha, que consulta los rodales y aplica evaluar_ficha.
+    """
+    radio = f"{radio_km:g}".replace(".", ",")
+    if planes_cercanos is None:
+        return ResultadoListaNegra(ESTADO_SIN_DATOS, "SAFF sin datos por el momento")
+    if planes_cercanos == 0:
+        return ResultadoListaNegra(ESTADO_ALERTA, f"Sin planes de manejo SAFF a menos de {radio} km")
+    return ResultadoListaNegra(
+        ESTADO_REVISAR,
+        f"{planes_cercanos} plan(es) a menos de {radio} km; abre la ficha para cruzar con rodales SIGCRA",
+    )
 
 
 def evaluar_ficha(ficha: dict) -> ResultadoListaNegra:

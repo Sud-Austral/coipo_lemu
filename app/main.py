@@ -1,8 +1,9 @@
 """Lemu 2.0: deteccion de cambios de cobertura forestal (corta no autorizada).
 
-Flujo: NDVI Sentinel-2 (per_api_gee) t0 vs t1 -> mascara de uso de suelo
-(CIREN) -> planes de manejo cercanos (per_api_saff) -> rodales del plan
-(per_api_sigcra) -> estado del punto.
+Flujo: poligonos de bosque CIREN de la comuna -> NDVI Sentinel-2 medio por
+poligono t0 vs t1 (per_api_gee) -> planes de manejo cercanos al centroide
+(per_api_saff) -> rodales del plan (per_api_sigcra, al abrir la ficha) ->
+estado del poligono.
 """
 from __future__ import annotations
 
@@ -13,22 +14,24 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.clientes import gee, saff, sigcra
-from app.logica import capas, ficha_punto
-from app.logica.orquestador import REGIONES_PILOTO, ejecutar_deteccion, info_regiones
+from app.logica import capas, ficha_punto, lista_negra, orquestador, zonas_ciren
+from app.logica.orquestador import REGIONES, info_regiones
 
-app = FastAPI(title="Lemu 2.0", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Lemu 2.0", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.on_event("startup")
-async def _precargar_saff():
-    # La carga SAFF de 10 anios tarda minutos: se hace en segundo plano al
-    # arrancar para que deteccion y ficha no queden esperando.
-    for cfg in REGIONES_PILOTO.values():
+async def _precargar():
+    # La carga SAFF de 10 anios tarda minutos y la de poligonos CIREN unos
+    # segundos: ambas en segundo plano al arrancar para que deteccion y ficha
+    # no queden esperando.
+    for region, cfg in REGIONES.items():
         ficha_punto.precargar_saff(cfg["comuna"])
+        zonas_ciren.precargar_zonas(region, cfg)
 
 
 def _region(region: str) -> dict:
-    config = REGIONES_PILOTO.get(region)
+    config = REGIONES.get(region)
     if not config:
         raise HTTPException(status_code=404, detail="region_no_configurada")
     return config
@@ -60,17 +63,21 @@ def regiones():
 
 @app.get("/api/v1/deteccion")
 async def deteccion(
-    region: str = Query(..., description="Region piloto, ver /api/v1/regiones"),
+    region: str = Query(..., description="Region, ver /api/v1/regiones"),
     t0: date = Query(..., description="Fecha inicial de comparacion (YYYY-MM-DD)"),
     t1: date = Query(..., description="Fecha final de comparacion (YYYY-MM-DD)"),
     cloud: int = Query(40, ge=0, le=100, description="Porcentaje maximo de nubes aceptado"),
+    min_ha: float = Query(zonas_ciren.MIN_HA_DEFECTO, ge=0, le=1000, description="Superficie minima del poligono CIREN"),
 ):
     if t0 >= t1:
         raise HTTPException(status_code=400, detail="t0_debe_ser_anterior_a_t1")
     if (t1 - t0).days > 365:
         raise HTTPException(status_code=400, detail="rango_maximo_1_anio")
-    resultado = await ejecutar_deteccion(region, t0.isoformat(), t1.isoformat(), cloud)
-    return resultado
+    resultado = await orquestador.deteccion(region, t0.isoformat(), t1.isoformat(), cloud, min_ha)
+    if resultado.get("error") == "region_no_configurada":
+        raise HTTPException(status_code=404, detail="region_no_configurada")
+    # 202 mientras el calculo sigue en segundo plano: el front consulta de nuevo cada 5 s.
+    return JSONResponse(status_code=202 if resultado["estado"] == "calculando" else 200, content=resultado)
 
 
 @app.get("/api/v1/sentinel/tiles")
@@ -101,7 +108,11 @@ async def punto_ficha(
 ):
     config = _region(region)
     ficha = await ficha_punto.ficha_punto(config["comuna"], config["centro"], lat, lon, radio_km, t1, esperar_saff=False)
-    return {"region": region, **ficha}
+    respuesta = {"region": region, **ficha}
+    if t1 is not None:
+        # Estado definitivo del cambio en este punto (con rodales SIGCRA).
+        respuesta["estado_cambio"] = lista_negra.evaluar_ficha(ficha).to_dict()
+    return respuesta
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

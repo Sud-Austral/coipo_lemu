@@ -110,16 +110,21 @@ jobs:
           cat /tmp/lemu-health.json
           curl --silent --show-error --max-time 10 "http://127.0.0.1:${LEMU_PORT}/ready" | tee /tmp/lemu-ready.json || true
 
-      - name: Smoke test deteccion piloto (Panguipulli)
+      - name: Smoke test deteccion por poligonos (Panguipulli)
         if: steps.secrets.outputs.pending != 'true'
         run: |
-          curl --fail-with-body --silent --show-error --max-time 60 \
-            "http://127.0.0.1:${LEMU_PORT}/api/v1/deteccion?region=panguipulli&t0=2026-07-01&t1=2026-09-01" \
-            | tee /tmp/lemu-deteccion.json
+          # El calculo corre en segundo plano: basta HTTP < 500 (puede responder 202 'calculando').
+          CODE="$(curl --silent --show-error --max-time 60 -o /tmp/lemu-deteccion.json -w '%{http_code}' \
+            "http://127.0.0.1:${LEMU_PORT}/api/v1/deteccion?region=panguipulli&t0=2026-07-01&t1=2026-09-01")"
+          echo "deteccion HTTP $CODE"
+          if [ "$CODE" -ge 500 ]; then echo "::error::/api/v1/deteccion devolvio HTTP $CODE"; exit 1; fi
           python3 - <<'PY'
           import json
           d = json.load(open('/tmp/lemu-deteccion.json'))
-          print('Lemu 2.0 smoke:', 'puntos=', d.get('puntos_evaluados'), 'alertas=', d.get('alertas'))
+          r = d.get('resumen') or {}
+          print('Lemu 2.0 deteccion:', 'estado=', d.get('estado'), 'avance=', d.get('avance'),
+                'evaluados=', r.get('poligonos_evaluados'), 'ha=', r.get('ha_evaluadas'), 'con_cambio=', r.get('con_cambio'),
+                'alertas=', r.get('alertas'), 'revisar=', r.get('revisar'), 'sin_datos=', r.get('sin_datos'))
           PY
 
       - name: Smoke test ficha del punto (SAFF + SIGCRA)

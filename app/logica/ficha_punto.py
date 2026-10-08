@@ -7,6 +7,7 @@ el punto de deteccion cae dentro de un rodal SIGCRA de alguno de los planes.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 import unicodedata
@@ -153,6 +154,41 @@ async def cargar_planes_comuna(comuna: str, hoy: date | None = None) -> dict:
 def saff_en_cache(comuna: str) -> bool:
     guardado = _cache_saff.get(normalizar(comuna))
     return bool(guardado and time.time() - guardado[0] < SAFF_CACHE_TTL_S)
+
+
+_ubicados: dict[str, tuple[float, list[tuple[float, float]]]] = {}
+
+
+def planes_ubicados_en_cache(comuna: str, centro: tuple[float, float]) -> list[tuple[float, float]] | None:
+    """(lat, lon) de los planes SAFF de la comuna ya cargados, o None si no hay carga.
+
+    No consulta SAFF: sirve para el estado del listado de deteccion, que debe
+    ser barato. La conversion UTM se hace una vez por carga.
+    """
+    clave = normalizar(comuna)
+    guardado = _cache_saff.get(clave)
+    if not guardado or time.time() - guardado[0] >= SAFF_CACHE_TTL_S:
+        return None
+    carga = guardado[1]
+    previo = _ubicados.get(clave)
+    if previo and previo[0] == carga["cargado_en"]:
+        return previo[1]
+    puntos = []
+    for plan in carga["planes"]:
+        ubic = ubicar_plan(plan, centro)
+        if ubic:
+            puntos.append((ubic["lat"], ubic["lon"]))
+    _ubicados[clave] = (carga["cargado_en"], puntos)
+    return puntos
+
+
+def contar_cercanos(puntos: list[tuple[float, float]], lat: float, lon: float, radio_km: float) -> int:
+    dlat = radio_km / 110.0
+    dlon = radio_km / (111.32 * max(0.1, abs(math.cos(math.radians(lat)))))
+    return sum(
+        1 for plat, plon in puntos
+        if abs(plat - lat) <= dlat and abs(plon - lon) <= dlon and geo.haversine_km(lat, lon, plat, plon) <= radio_km
+    )
 
 
 _tareas: dict[str, asyncio.Task] = {}

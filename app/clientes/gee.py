@@ -14,30 +14,46 @@ class GeeError(RuntimeError):
     """Error al consultar la API de GEE (upstream)."""
 
 
-async def query_point_index(
-    lat: float,
-    lon: float,
-    start: str,
-    end: str,
-    cloud: int = 40,
-) -> dict:
-    """Consulta un índice (NDVI por defecto) para un punto y rango de fechas.
+ZONAL_TIMEOUT_S = 180.0
 
-    Usa /v1/query/point, que ya existe en per_api_gee.
+
+async def zonal_ndvi_change(
+    features: dict,
+    t0: tuple[str, str],
+    t1: tuple[str, str],
+    cloud: int = 40,
+    scale: int = 20,
+) -> dict:
+    """NDVI medio por poligono en t0 y t1 (POST /v1/zonal/ndvi-change).
+
+    `features` es una FeatureCollection 4326 (max 2500, cada una con
+    properties.id). Devuelve {images:{t0,t1}, scale, items:[{id, ndvi_t0,
+    ndvi_t1, delta}]}. Sin imagenes en algun periodo -> GeeError
+    gee_sin_imagenes.
     """
-    url = f"{GEE_BASE_URL}/v1/query/point"
-    params = {"lat": lat, "lon": lon, "start": start, "end": end, "cloud": cloud}
+    url = f"{GEE_BASE_URL}/v1/zonal/ndvi-change"
+    body = {
+        "features": features,
+        "t0_start": t0[0], "t0_end": t0[1],
+        "t1_start": t1[0], "t1_end": t1[1],
+        "cloud": cloud, "scale": scale,
+    }
     headers = {"X-API-Key": GEE_API_KEY}
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
-            resp = await client.get(url, params=params, headers=headers)
+        async with httpx.AsyncClient(timeout=ZONAL_TIMEOUT_S) as client:
+            resp = await client.post(url, json=body, headers=headers)
     except httpx.HTTPError as exc:
-        raise GeeError(f"gee_unreachable: {exc}") from exc
+        raise GeeError(f"gee_unreachable: {type(exc).__name__}") from exc
     if resp.status_code == 401:
         raise GeeError("gee_unauthorized")
+    if resp.status_code == 422 and "NO_SENTINEL2_IMAGES" in resp.text:
+        raise GeeError("gee_sin_imagenes")
     if resp.status_code >= 400:
-        raise GeeError(f"gee_error_{resp.status_code}: {resp.text[:200]}")
-    return resp.json()
+        raise GeeError(f"gee_error_{resp.status_code}")
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise GeeError("gee_respuesta_invalida") from exc
 
 
 async def analysis_heatmap(
