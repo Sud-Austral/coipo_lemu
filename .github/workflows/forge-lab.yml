@@ -131,7 +131,7 @@ jobs:
         run: |
           curl --fail-with-body --silent --show-error --max-time 10 \
             -H 'Host: dev-prueba1.conaf.cl' \
-            http://127.0.0.1/lab/lemu2.0/health
+            http://127.0.0.1/lab/lemu2-0/health
 
       - name: Verify Forge control plane
         run: curl --fail --silent --show-error http://127.0.0.1:8310/api/health

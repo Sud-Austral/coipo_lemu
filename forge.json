@@ -1,6 +1,6 @@
 {
   "name": "Lemu 2.0",
-  "slug": "lemu2.0",
+  "slug": "lemu2-0",
   "environment": "lab",
   "runtime": "docker",
   "version": "2026.10.08.1",
