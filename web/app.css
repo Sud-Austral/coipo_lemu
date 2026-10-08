@@ -113,6 +113,10 @@ select:focus, input:focus, button:focus-visible, summary:focus-visible{outline:2
 .planes{display:flex; flex-direction:column; gap:8px; margin-top:8px;}
 .plan{border:1px solid var(--borde); border-radius:12px; padding:10px 12px;}
 .plan.dentro{border-color:var(--verde); background:var(--verde-claro);}
+.plan.mismo-rol{border-left:4px solid #e0b400;}
+.predio-ficha{font-weight:700; font-size:14px; margin-bottom:8px; padding-left:8px; border-left:4px solid #e0b400;}
+h3.sub{font-size:13px; margin:12px 0 2px; color:var(--verde-hover);}
+.maplibregl-popup-content hr.sep{border:none; border-top:1px solid var(--borde); margin:8px 0;}
 .plan h3{font-size:14px; margin-bottom:6px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
 .plan dl{display:grid; grid-template-columns:max-content 1fr; gap:2px 12px; font-size:12px;}
 .plan dt{color:var(--gris);}

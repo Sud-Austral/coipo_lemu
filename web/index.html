@@ -62,6 +62,12 @@
         </div>
 
         <div class="grupo">
+          <label class="check"><input type="checkbox" id="predios-on"> Predios rurales <span id="predios-anio"></span></label>
+          <label class="rango">Opacidad <input type="range" id="predios-opacidad" min="0" max="100" value="90"> <output id="predios-opacidad-val">90 %</output></label>
+          <div class="muted chico">Deslindes SII preparados por CIREN (IDE Minagri). Clic en el mapa: rol y planes SAFF del rol.</div>
+        </div>
+
+        <div class="grupo">
           <div class="grupo-titulo">NDVI Sentinel-2</div>
           <div class="segmentado" role="radiogroup" aria-label="NDVI Sentinel-2">
             <button type="button" data-ndvi="" class="activo" aria-pressed="true">Apagado</button>
@@ -112,8 +118,8 @@
 
     <p class="nota">Se evalúa cada polígono de bosque CIREN de la comuna con el NDVI Sentinel-2 medio en t0 y t1;
       hay cambio si el NDVI cae 0,15 o más. Una caída fuerte puede indicar corta, pero también sequía o estacionalidad;
-      por eso se cruza el centroide del polígono con planes de manejo SAFF (a 3 km) y, al abrir la ficha, con los
-      rodales SIGCRA antes de marcar una alerta.</p>
+      por eso el centroide del polígono se cruza con el predio CIREN (rol SII) y los planes de manejo SAFF de ese rol,
+      de respaldo con los planes a 3 km y, al abrir la ficha, con los rodales SIGCRA antes de marcar una alerta.</p>
   </aside>
 </main>
 

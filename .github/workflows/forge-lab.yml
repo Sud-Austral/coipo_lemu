@@ -124,7 +124,24 @@ jobs:
           r = d.get('resumen') or {}
           print('Lemu 2.0 deteccion:', 'estado=', d.get('estado'), 'avance=', d.get('avance'),
                 'evaluados=', r.get('poligonos_evaluados'), 'ha=', r.get('ha_evaluadas'), 'con_cambio=', r.get('con_cambio'),
-                'alertas=', r.get('alertas'), 'revisar=', r.get('revisar'), 'sin_datos=', r.get('sin_datos'))
+                'alertas=', r.get('alertas'), 'revisar=', r.get('revisar'), 'en_regla=', r.get('en_regla'),
+                'sin_datos=', r.get('sin_datos'), 'predios=', (d.get('predios') or {}).get('predios'))
+          PY
+
+      - name: Smoke test predio CIREN por punto
+        if: steps.secrets.outputs.pending != 'true'
+        run: |
+          # Falla solo en HTTP 5xx. Imprime solo conteos y estados.
+          CODE="$(curl --silent --show-error --max-time 60 -o /tmp/lemu-predio.json -w '%{http_code}' \
+            "http://127.0.0.1:${LEMU_PORT}/api/v1/predio/punto?region=panguipulli&lat=-39.715&lon=-72.145")"
+          echo "predio HTTP $CODE"
+          if [ "$CODE" -ge 500 ]; then echo "::error::/api/v1/predio/punto devolvio HTTP $CODE"; exit 1; fi
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/lemu-predio.json'))
+          print('Lemu 2.0 predio:', 'estado=', d.get('estado'), 'con_rol=', bool(d.get('rol_norm')),
+                'con_geometria=', bool(d.get('geometria')), 'saff=', (d.get('saff') or {}).get('estado'),
+                'planes_saff=', d.get('planes_saff'))
           PY
 
       - name: Smoke test ficha del punto (SAFF + SIGCRA)
@@ -140,6 +157,7 @@ jobs:
           d = json.load(open('/tmp/lemu-ficha.json'))
           saff = d.get('saff') or {}
           print('Lemu 2.0 ficha:', 'saff=', saff.get('estado'), 'planes_comuna=', saff.get('planes_comuna'),
+                'predio=', (d.get('predio') or {}).get('estado'), 'planes_rol=', len(d.get('planes_rol') or []),
                 'planes_cercanos=', len(d.get('planes') or []), 'rodales=', len((d.get('rodales') or {}).get('features') or []),
                 'sigcra=', (d.get('sigcra') or {}).get('estado'))
           PY

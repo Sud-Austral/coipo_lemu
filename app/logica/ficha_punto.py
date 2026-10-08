@@ -1,8 +1,10 @@
-"""Ficha de un punto: planes de manejo SAFF cercanos y sus rodales SIGCRA.
+"""Ficha de un punto: predio CIREN, planes SAFF del mismo rol y cercanos, rodales SIGCRA.
 
-SAFF no tiene geometria del predio, solo un punto de referencia en UTM
-(Norte01/Este01). La cercania se mide desde ese punto; el cruce fuerte es si
-el punto de deteccion cae dentro de un rodal SIGCRA de alguno de los planes.
+SAFF no tiene geometria del predio, solo el rol de avaluo y un punto de
+referencia en UTM (Norte01/Este01). El cruce principal es por rol: el predio
+CIREN que contiene el punto contra «Rol Avaluo» de SAFF (rol.py). La
+cercania al punto de referencia queda como respaldo y el cruce con rodales
+SIGCRA como evidencia adicional.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from datetime import date, timedelta
 import httpx
 
 from app.clientes import saff, sigcra
-from app.logica import geo
+from app.logica import geo, rol
 
 NOTA_CERCANIA = "Cercanía por punto de referencia del predio declarado en SAFF (no por el polígono)."
 SAFF_CACHE_TTL_S = 6 * 3600
@@ -182,6 +184,26 @@ def planes_ubicados_en_cache(comuna: str, centro: tuple[float, float]) -> list[t
     return puntos
 
 
+_por_rol: dict[str, tuple[float, dict]] = {}
+
+
+def _indice_rol(carga: dict) -> dict:
+    previo = _por_rol.get(carga["comuna"])
+    if previo and previo[0] == carga["cargado_en"]:
+        return previo[1]
+    indice = rol.indexar_planes(carga["planes"])
+    _por_rol[carga["comuna"]] = (carga["cargado_en"], indice)
+    return indice
+
+
+def indice_rol_en_cache(comuna: str) -> dict | None:
+    """rol -> planes SAFF de la comuna ya cargada, o None si no hay carga (no consulta SAFF)."""
+    guardado = _cache_saff.get(normalizar(comuna))
+    if not guardado or time.time() - guardado[0] >= SAFF_CACHE_TTL_S:
+        return None
+    return _indice_rol(guardado[1])
+
+
 def contar_cercanos(puntos: list[tuple[float, float]], lat: float, lon: float, radio_km: float) -> int:
     dlat = radio_km / 110.0
     dlon = radio_km / (111.32 * max(0.1, abs(math.cos(math.radians(lat)))))
@@ -239,17 +261,32 @@ async def _rodales(nro: str) -> dict:
         return {"estado": "sin_datos", "error": str(exc)}
 
 
-def _conclusion(radio_km: float, planes: list[dict], dentro: dict | None, saff_ok: bool) -> str:
+def _conclusion(
+    radio_km: float, planes: list[dict], dentro: dict | None, saff_ok: bool,
+    predio: dict | None = None, planes_rol: list[dict] | None = None,
+) -> str:
     if not saff_ok:
         return "Sin datos por el momento: SAFF no respondió."
     radio = f"{radio_km:g}".replace(".", ",")
-    if not planes:
-        return f"No hay planes de manejo registrados en SAFF a menos de {radio} km."
-    n = len(planes)
-    base = f"Hay {n} plan{'es' if n != 1 else ''} de manejo a menos de {radio} km"
-    if dentro:
-        return f"{base}; el punto cae dentro del rodal {dentro['rodal']} del plan {dentro['nro_solicitud']}."
-    return f"{base}; el punto no cae dentro de los rodales SIGCRA consultados."
+    partes = []
+    if predio and predio.get("estado") == "ok" and predio.get("rol_norm"):
+        n_rol = len(planes_rol or [])
+        if n_rol:
+            partes.append(f"Hay {n_rol} plan{'es' if n_rol != 1 else ''} SAFF para el rol {predio['rol_norm']}.")
+        else:
+            partes.append(f"No hay planes SAFF para el rol {predio['rol_norm']}.")
+    otros = "otros " if planes_rol else ""
+    if planes:
+        n = len(planes)
+        partes.append(f"Hay {n} {otros}plan{'es' if n != 1 else ''} de manejo a menos de {radio} km.")
+    else:
+        partes.append(f"No hay {otros}planes de manejo registrados en SAFF a menos de {radio} km.")
+    if planes or planes_rol:
+        if dentro:
+            partes.append(f"El punto cae dentro del rodal {dentro['rodal']} del plan {dentro['nro_solicitud']}.")
+        else:
+            partes.append("El punto no cae dentro de los rodales SIGCRA consultados.")
+    return " ".join(partes)
 
 
 async def ficha_punto(
@@ -260,19 +297,24 @@ async def ficha_punto(
     radio_km: float = 3.0,
     t1: date | None = None,
     esperar_saff: bool = True,
+    predio: dict | None = None,
 ) -> dict:
-    """Planes SAFF cercanos, rodales SIGCRA y cruce punto-en-rodal.
+    """Planes SAFF del rol del predio y cercanos, rodales SIGCRA y cruce punto-en-rodal.
 
-    Con esperar_saff=False no bloquea si la carga SAFF de la comuna aun no
-    esta en cache: la lanza en segundo plano y responde sin_datos (cargando).
+    predio: salida de predios_ciren.info_predio para el punto (None = sin
+    datos). Con esperar_saff=False no bloquea si la carga SAFF de la comuna
+    aun no esta en cache: la lanza en segundo plano y responde sin_datos.
     """
+    predio = predio or {"estado": "sin_datos"}
     respuesta: dict = {
         "lat": lat,
         "lon": lon,
         "radio_km": radio_km,
         "nota_cercania": NOTA_CERCANIA,
+        "predio": predio,
         "saff": {"estado": "ok"},
         "sigcra": {"estado": "no_consultado"},
+        "planes_rol": [],
         "planes": [],
         "rodales": {"type": "FeatureCollection", "features": []},
         "dentro_de_rodal": None,
@@ -295,25 +337,33 @@ async def ficha_punto(
         "truncado": carga["truncado"],
     }
 
+    del_rol = rol.planes_del_predio(_indice_rol(carga), predio if predio.get("estado") == "ok" else None)
+    ids_rol = {id(p) for p in del_rol}
+    planes_rol = []
     cercanos = []
     for plan in carga["planes"]:
         ubic = ubicar_plan(plan, centro)
-        if not ubic:
-            continue
-        dist = geo.haversine_km(lat, lon, ubic["lat"], ubic["lon"])
-        if dist <= radio_km:
+        dist = geo.haversine_km(lat, lon, ubic["lat"], ubic["lon"]) if ubic else None
+        if id(plan) in ids_rol:
+            planes_rol.append({**plan, "ubicacion": ubic, "dist_km": round(dist, 3) if dist is not None else None, "mismo_rol": True})
+        elif dist is not None and dist <= radio_km:
             cercanos.append({**plan, "ubicacion": ubic, "dist_km": round(dist, 3)})
     cercanos.sort(key=lambda p: p["dist_km"])
     cercanos = cercanos[:MAX_PLANES]
+    # Del rol: primero los aprobados a t1 y, dentro de cada grupo, la resolucion mas reciente.
+    planes_rol.sort(key=lambda p: str(p.get("Fec.Resolucion") or ""), reverse=True)
+    planes_rol.sort(key=lambda p: not plan_aprobado(p, t1))
+    planes_rol = planes_rol[:MAX_PLANES]
 
-    consultar = [p for p in cercanos if p.get("Nro.Solicitud")][:MAX_PLANES_SIGCRA]
+    # SIGCRA: primero los planes del rol, luego los mas cercanos.
+    consultar = [p for p in planes_rol + cercanos if p.get("Nro.Solicitud")][:MAX_PLANES_SIGCRA]
     rodales = await asyncio.gather(*(_rodales(str(p["Nro.Solicitud"])) for p in consultar))
     por_plan = {str(p["Nro.Solicitud"]): r for p, r in zip(consultar, rodales)}
 
     features = []
     dentro = None
     fallas = []
-    for plan in cercanos:
+    for plan in planes_rol + cercanos:
         nro = str(plan.get("Nro.Solicitud") or "")
         r = por_plan.get(nro)
         plan["aprobado"] = plan_aprobado(plan, None)
@@ -349,10 +399,11 @@ async def ficha_punto(
             respuesta["sigcra"] = {"estado": "parcial", "planes_sin_respuesta": fallas}
         else:
             respuesta["sigcra"] = {"estado": "ok"}
+    respuesta["planes_rol"] = planes_rol
     respuesta["planes"] = cercanos
     respuesta["rodales"] = {"type": "FeatureCollection", "features": features}
     respuesta["dentro_de_rodal"] = dentro
-    respuesta["conclusion"] = _conclusion(radio_km, cercanos, dentro, True)
+    respuesta["conclusion"] = _conclusion(radio_km, cercanos, dentro, True, predio, planes_rol)
     if consultar and respuesta["sigcra"]["estado"] == "sin_datos":
         respuesta["conclusion"] += " Sin datos por el momento de SIGCRA (rodales)."
     return respuesta

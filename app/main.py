@@ -1,9 +1,9 @@
 """Lemu 2.0: deteccion de cambios de cobertura forestal (corta no autorizada).
 
 Flujo: poligonos de bosque CIREN de la comuna -> NDVI Sentinel-2 medio por
-poligono t0 vs t1 (per_api_gee) -> planes de manejo cercanos al centroide
-(per_api_saff) -> rodales del plan (per_api_sigcra, al abrir la ficha) ->
-estado del poligono.
+poligono t0 vs t1 (per_api_gee) -> predio CIREN (rol SII) del centroide ->
+planes de manejo del mismo rol o cercanos al centroide (per_api_saff) ->
+rodales del plan (per_api_sigcra, al abrir la ficha) -> estado del poligono.
 """
 from __future__ import annotations
 
@@ -14,20 +14,21 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.clientes import gee, saff, sigcra
-from app.logica import capas, ficha_punto, lista_negra, orquestador, zonas_ciren
+from app.logica import capas, ficha_punto, lista_negra, orquestador, predios_ciren, rol, zonas_ciren
 from app.logica.orquestador import REGIONES, info_regiones
 
-app = FastAPI(title="Lemu 2.0", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Lemu 2.0", version="0.4.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.on_event("startup")
 async def _precargar():
-    # La carga SAFF de 10 anios tarda minutos y la de poligonos CIREN unos
-    # segundos: ambas en segundo plano al arrancar para que deteccion y ficha
-    # no queden esperando.
+    # La carga SAFF de 10 anios tarda minutos y las de poligonos y predios
+    # CIREN unos segundos: todas en segundo plano al arrancar para que
+    # deteccion y ficha no queden esperando.
     for region, cfg in REGIONES.items():
         ficha_punto.precargar_saff(cfg["comuna"])
         zonas_ciren.precargar_zonas(region, cfg)
+        predios_ciren.precargar_predios(region, cfg)
 
 
 def _region(region: str) -> dict:
@@ -107,11 +108,47 @@ async def punto_ficha(
     t1: date | None = Query(None, description="Si se entrega, evalua aprobacion a esa fecha"),
 ):
     config = _region(region)
-    ficha = await ficha_punto.ficha_punto(config["comuna"], config["centro"], lat, lon, radio_km, t1, esperar_saff=False)
+    predio = await predios_ciren.buscar_predio(region, config, lat, lon)
+    ficha = await ficha_punto.ficha_punto(
+        config["comuna"], config["centro"], lat, lon, radio_km, t1, esperar_saff=False, predio=predio,
+    )
     respuesta = {"region": region, **ficha}
     if t1 is not None:
         # Estado definitivo del cambio en este punto (con rodales SIGCRA).
         respuesta["estado_cambio"] = lista_negra.evaluar_ficha(ficha).to_dict()
+    return respuesta
+
+
+@app.get("/api/v1/predio/punto")
+async def predio_punto(
+    region: str = Query(...),
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+):
+    """Predio CIREN (rol SII) del punto, con su contorno y los planes SAFF de ese rol."""
+    config = _region(region)
+    predio = await predios_ciren.buscar_predio(region, config, lat, lon, exacto=True)
+    respuesta = {"region": region, **{k: v for k, v in predio.items() if k != "geometry"}}
+    respuesta["geometria"] = predio.get("geometry")
+    indice = ficha_punto.indice_rol_en_cache(config["comuna"])
+    if indice is None:
+        ficha_punto.precargar_saff(config["comuna"])
+        respuesta["saff"] = {"estado": "sin_datos"}
+        respuesta["planes_saff"] = None
+        respuesta["planes"] = []
+        return respuesta
+    planes = rol.planes_del_predio(indice, predio if predio["estado"] == "ok" else None)
+    respuesta["saff"] = {"estado": "ok"}
+    respuesta["planes_saff"] = len(planes)
+    respuesta["planes"] = [
+        {
+            "nro_solicitud": p.get("Nro.Solicitud"),
+            "estado": p.get("Estdo Solicitud"),
+            "fec_resolucion": p.get("Fec.Resolucion"),
+            "aprobado": ficha_punto.plan_aprobado(p, None),
+        }
+        for p in planes
+    ]
     return respuesta
 
 

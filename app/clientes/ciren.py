@@ -1,7 +1,10 @@
-"""Cliente HTTP para CIREN (ArcGIS REST, Catastro de Uso de la Tierra CONAF).
+"""Cliente HTTP para CIREN (ArcGIS REST).
 
-Servicio publico sin clave: https://esri.ciren.cl/server/rest/services/
-USOS_DE_LA_TIERRA__CONAF/MapServer
+Servicios publicos sin clave en https://esri.ciren.cl/server/rest/services/:
+- USOS_DE_LA_TIERRA__CONAF/MapServer: Catastro de Uso de la Tierra CONAF.
+- IDEMINAGRI/PROPIEDADES_RURALES/MapServer: deslindes prediales SII
+  preparados por CIREN (IDE Minagri), una capa por region. Campos: rol,
+  desccomu, comudere (codigo comuna SUBDERE), provdere, regidere.
 
 No hay autenticacion ni secreto que configurar.
 """
@@ -12,6 +15,8 @@ import asyncio
 import httpx
 
 CIREN_BASE_URL = "https://esri.ciren.cl/server/rest/services/USOS_DE_LA_TIERRA__CONAF/MapServer"
+PREDIOS_BASE_URL = "https://esri.ciren.cl/server/rest/services/IDEMINAGRI/PROPIEDADES_RURALES/MapServer"
+CAMPOS_PREDIO = "objectid,rol,desccomu,comudere"
 TIMEOUT_S = 30.0
 
 # Usos considerados "bosque o plantacion forestal" para la mascara: todo lo
@@ -144,18 +149,22 @@ async def query_poligonos(
     geometry_precision: int = 5,
     concurrencia: int = 3,
     timeout_s: float = 120.0,
+    base_url: str = CIREN_BASE_URL,
+    max_por_pagina: int | None = None,
 ) -> list[dict]:
     """Todos los poligonos (GeoJSON 4326) de la capa que cumplen `where`.
 
     Pagina con resultOffset/resultRecordCount usando el maxRecordCount que
-    declara el servicio, ordenado por objectid para que las paginas no se
-    traslapen. Lanza CirenError si cualquier pagina falla (nada de cargas
-    parciales).
+    declara el servicio (acotado por max_por_pagina), ordenado por objectid
+    para que las paginas no se traslapen. Lanza CirenError si cualquier
+    pagina falla (nada de cargas parciales).
     """
-    url = f"{CIREN_BASE_URL}/{layer_id}"
+    url = f"{base_url}/{layer_id}"
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         info = await _get_json(client, url, {"f": "json"})
         por_pagina = int(info.get("maxRecordCount") or 1000)
+        if max_por_pagina:
+            por_pagina = min(por_pagina, max_por_pagina)
         conteo = await _get_json(client, f"{url}/query", {"where": where, "returnCountOnly": "true", "f": "json"})
         total = int(conteo.get("count") or 0)
         sem = asyncio.Semaphore(concurrencia)
@@ -181,6 +190,25 @@ async def query_poligonos(
     if len(features) < total:
         raise CirenError("ciren_paginacion_incompleta")
     return features
+
+
+async def query_predio_punto(layer_id: int, lon: float, lat: float, geometria: bool = True) -> dict | None:
+    """Predio CIREN (GeoJSON 4326) que contiene el punto, o None."""
+    params = {
+        "geometry": f"{lon},{lat}",
+        "geometryType": "esriGeometryPoint",
+        "inSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": CAMPOS_PREDIO,
+        "returnGeometry": "true" if geometria else "false",
+        "outSR": "4326",
+        "geometryPrecision": "6",
+        "f": "geojson",
+    }
+    async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+        data = await _get_json(client, f"{PREDIOS_BASE_URL}/{layer_id}/query", params)
+    features = data.get("features") or []
+    return features[0] if features else None
 
 
 def _sin_tildes(texto: str) -> str:

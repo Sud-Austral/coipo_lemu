@@ -35,7 +35,7 @@ def _where(comuna: str) -> str:
     return f"upper(nom_com) like '%{comuna.upper()}%' AND uso='{USO_BOSQUE}'"
 
 
-def _limpiar_geometria(geometria: dict | None) -> dict | None:
+def limpiar_geometria(geometria: dict | None) -> dict | None:
     """Quita anillos degenerados que deja la simplificacion (< 4 vertices)."""
     if not geometria or geometria.get("type") not in ("Polygon", "MultiPolygon"):
         return None
@@ -54,7 +54,7 @@ def _limpiar_geometria(geometria: dict | None) -> dict | None:
 
 def _zona(feature: dict) -> dict | None:
     props = feature.get("properties") or {}
-    geometria = _limpiar_geometria(feature.get("geometry"))
+    geometria = limpiar_geometria(feature.get("geometry"))
     zid = props.get("objectid")
     if geometria is None or zid is None:
         return None

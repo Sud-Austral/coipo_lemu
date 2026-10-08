@@ -25,8 +25,12 @@ def test_es_uso_forestal():
     assert ciren.es_uso_forestal(None, None) is False
 
 
+PREDIO_OK = {"estado": "ok", "rol": "209-58", "rol_norm": "209-58", "comuna": "PANGUIPULLI", "comudere": "14108"}
+
+
 def _ficha(**extra):
-    base = {"radio_km": 3.0, "saff": {"estado": "ok"}, "sigcra": {"estado": "ok"}, "planes": [], "dentro_de_rodal": None}
+    base = {"radio_km": 3.0, "saff": {"estado": "ok"}, "sigcra": {"estado": "ok"}, "predio": PREDIO_OK,
+            "planes_rol": [], "planes": [], "dentro_de_rodal": None}
     return {**base, **extra}
 
 
@@ -49,9 +53,11 @@ def test_estado_dentro_de_rodal_aprobado_es_en_regla():
     assert resultado.plan_manejo == {"nro_solicitud": "494/32-74/18", "rodal": "4"}
 
 
-def test_estado_sigcra_caido_con_planes_es_sin_datos():
+def test_estado_sigcra_caido_con_planes_cercanos_queda_revisar():
     ficha = _ficha(planes=[{"Nro.Solicitud": "1"}], sigcra={"estado": "sin_datos"})
-    assert lista_negra.evaluar_ficha(ficha).estado == lista_negra.ESTADO_SIN_DATOS
+    resultado = lista_negra.evaluar_ficha(ficha)
+    assert resultado.estado == lista_negra.ESTADO_REVISAR
+    assert "SIGCRA sin datos" in resultado.motivo
 
 
 def test_estado_plan_cercano_fuera_de_rodal_es_revisar():
@@ -72,10 +78,10 @@ def test_plan_aprobado_respeta_fecha_t1():
     assert plan_aprobado({"Estdo Solicitud": "RECHAZADA", "Super.Aprobada": 0}, None) is False
 
 
-def test_estado_listado_por_cercania():
-    assert lista_negra.evaluar_cercania(None, 3.0).estado == lista_negra.ESTADO_SIN_DATOS
-    assert lista_negra.evaluar_cercania(0, 3.0).estado == lista_negra.ESTADO_ALERTA
-    assert lista_negra.evaluar_cercania(2, 3.0).estado == lista_negra.ESTADO_REVISAR
+def test_estado_listado_sin_rol_por_cercania():
+    assert lista_negra.evaluar(False, PREDIO_OK, [], 0, 3.0).estado == lista_negra.ESTADO_SIN_DATOS
+    assert lista_negra.evaluar(True, PREDIO_OK, [], 0, 3.0).estado == lista_negra.ESTADO_ALERTA
+    assert lista_negra.evaluar(True, PREDIO_OK, [], 2, 3.0).estado == lista_negra.ESTADO_REVISAR
 
 
 CUADRADO = {"type": "Polygon", "coordinates": [[[-72.2, -39.7], [-72.19, -39.7], [-72.19, -39.69], [-72.2, -39.69], [-72.2, -39.7]]]}
@@ -97,13 +103,20 @@ async def _esperar(orq, *args):
 
 @pytest.fixture
 def orq(monkeypatch):
-    from app.logica import ficha_punto, orquestador, zonas_ciren
+    from app.logica import ficha_punto, orquestador, predios_ciren, zonas_ciren
 
     async def fake_zonas(region, config):
         return {"capa": 12, "anio": 2024, "zonas": [_zona(1), _zona(2), _zona(3), _zona(4, ha=0.4)]}
 
     monkeypatch.setattr(zonas_ciren, "cargar_zonas", fake_zonas)
     monkeypatch.setattr(ficha_punto, "precargar_saff", lambda comuna: None)
+    monkeypatch.setattr(ficha_punto, "indice_rol_en_cache", lambda comuna: {})
+    monkeypatch.setattr(predios_ciren, "precargar_predios", lambda region, config: None)
+    # Un predio con rol que cubre todos los centroides de prueba.
+    predio = {"id": 1, "rol": "209-58", "rol_norm": "209-58", "comuna": "PANGUIPULLI", "comudere": "14108",
+              "bbox": [-72.2, -39.7, -72.19, -39.69], "geometry": CUADRADO}
+    carga_predios = {"region": "panguipulli", "capa": 11, "anio": 2018, "cargado_en": 1.0, "predios": [predio]}
+    monkeypatch.setattr(predios_ciren, "predios_en_cache", lambda region: carga_predios)
     monkeypatch.setattr(orquestador, "TAMANO_LOTE", 2)
     orquestador._trabajos.clear()
     yield orquestador
@@ -136,7 +149,21 @@ async def test_deteccion_poligonos_en_lotes_y_estado_saff(orq, monkeypatch):
     assert [p["id"] for p in r["poligonos"]] == [1, 3]  # mas negativo primero
     assert {p["estado"] for p in r["poligonos"]} == {"revisar"}
     assert r["poligonos"][0]["planes_cercanos"] == 1
+    assert r["poligonos"][0]["predio"]["rol"] == "209-58"
+    assert "geometry" not in r["poligonos"][0]["predio"]
     assert r["imagenes"] == {"t0": 2, "t1": 3}
+
+    # Plan aprobado (antes de t1) con el mismo rol -> en_regla ya en el listado.
+    plan = {"Nro.Solicitud": "77/14/2025", "Rol Avaluo": "00209-00058", "Comuna_Predio": "Panguipulli",
+            "Estdo Solicitud": "APROBADA", "Fec.Resolucion": "2025-03-01T00:00:00"}
+    from app.logica import rol
+
+    monkeypatch.setattr(ficha_punto, "indice_rol_en_cache", lambda comuna: rol.indexar_planes([plan]))
+    r3 = await orq.deteccion("panguipulli", "2026-07-01", "2026-09-01", 40, 1.0)
+    assert r3["resumen"]["en_regla"] == 2
+    assert r3["poligonos"][0]["motivo"] == "Plan 77/14/2025 aprobado para el rol 209-58"
+    assert r3["poligonos"][0]["planes_rol"] == 1
+    monkeypatch.setattr(ficha_punto, "indice_rol_en_cache", lambda comuna: {})
 
     # Sin planes cerca -> alerta; el estado se recalcula sin volver a GEE.
     monkeypatch.setattr(ficha_punto, "planes_ubicados_en_cache", lambda comuna, centro: [])

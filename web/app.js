@@ -1,6 +1,7 @@
 'use strict';
 
 const CIREN_URL = 'https://esri.ciren.cl/server/rest/services/USOS_DE_LA_TIERRA__CONAF/MapServer';
+const PREDIOS_URL = 'https://esri.ciren.cl/server/rest/services/IDEMINAGRI/PROPIEDADES_RURALES/MapServer';
 const WAYBACK_CONFIG_URL = 'https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json';
 const SIN_DATOS = 'Sin datos por el momento';
 const ZOOM_MEJORAR = 14;
@@ -54,6 +55,11 @@ function num(v, dec = 2) {
 function ha(v) {
   const t = num(v);
   return t === '—' ? t : `${t} ha`;
+}
+
+// 'PANGUIPULLI' -> 'Panguipulli'
+function titulo(v) {
+  return String(v ?? '').toLowerCase().replace(/(^|[\s-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
 }
 
 function infoEstado(e) {
@@ -127,6 +133,7 @@ const map = new maplibregl.Map({
       },
       cambios: { type: 'geojson', data: VACIO },
       rodales: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      predio: { type: 'geojson', data: VACIO },
       referencias: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
     },
     layers: [
@@ -144,6 +151,8 @@ const map = new maplibregl.Map({
         id: 'cambios-sel', type: 'line', source: 'cambios', filter: ['==', ['get', 'i'], -1],
         paint: { 'line-color': '#ffffff', 'line-width': 4, 'line-dasharray': [2, 1] },
       },
+      { id: 'predio-halo', type: 'line', source: 'predio', paint: { 'line-color': '#000000', 'line-width': 5, 'line-opacity': 0.45 } },
+      { id: 'predio-borde', type: 'line', source: 'predio', paint: { 'line-color': '#ffdd00', 'line-width': 2.5 } },
       { id: 'rodales-relleno', type: 'fill', source: 'rodales', paint: { 'fill-color': '#7fdc9a', 'fill-opacity': 0.15 } },
       { id: 'rodales-borde', type: 'line', source: 'rodales', paint: { 'line-color': '#7fdc9a', 'line-width': 2 } },
       {
@@ -194,7 +203,7 @@ function ponerCapaCiren(layerId) {
     id: 'ciren', type: 'raster', source: 'ciren',
     layout: { visibility: $('ciren-on').checked ? 'visible' : 'none' },
     paint: { 'raster-opacity': cirenOpacidad() },
-  }, 'tope-capas');
+  }, map.getLayer('predios') ? 'predios' : 'tope-capas');
 }
 
 $('ciren-on').addEventListener('change', () => {
@@ -204,6 +213,82 @@ $('ciren-opacidad').addEventListener('input', () => {
   $('ciren-opacidad-val').textContent = `${$('ciren-opacidad').value} %`;
   if (map.getLayer('ciren')) map.setPaintProperty('ciren', 'raster-opacity', cirenOpacidad());
 });
+
+/* ---------- predios rurales CIREN ---------- */
+
+// La simbología por defecto (borde rojo fino) casi no se ve sobre el satélite:
+// se redibuja la capa con contorno amarillo y sin relleno (dynamicLayers). Sin
+// rótulos: el servidor los repetiría en cada tesela; el rol sale al hacer clic.
+function dynamicLayersPredios(layerId) {
+  return JSON.stringify([{
+    id: layerId,
+    source: { type: 'mapLayer', mapLayerId: layerId },
+    drawingInfo: {
+      showLabels: false,
+      renderer: {
+        type: 'simple',
+        symbol: { type: 'esriSFS', style: 'esriSFSNull', outline: { type: 'esriSLS', style: 'esriSLSSolid', color: [255, 221, 0, 255], width: 1.5 } },
+      },
+    },
+  }]);
+}
+
+function ponerCapaPredios(layerId) {
+  if (map.getLayer('predios')) map.removeLayer('predios');
+  if (map.getSource('predios')) map.removeSource('predios');
+  map.addSource('predios', {
+    type: 'raster', tileSize: 256,
+    tiles: [`${PREDIOS_URL}/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&dynamicLayers=${encodeURIComponent(dynamicLayersPredios(layerId))}&f=image`],
+    attribution: 'Predios rurales © CIREN (IDE Minagri)',
+  });
+  map.addLayer({
+    id: 'predios', type: 'raster', source: 'predios',
+    layout: { visibility: $('predios-on').checked ? 'visible' : 'none' },
+    paint: { 'raster-opacity': Number($('predios-opacidad').value) / 100 },
+  }, 'tope-capas');
+}
+
+$('predios-on').addEventListener('change', () => {
+  if (map.getLayer('predios')) map.setLayoutProperty('predios', 'visibility', $('predios-on').checked ? 'visible' : 'none');
+  if (!$('predios-on').checked && estado.sel === null) dibujarPredio(null);
+});
+$('predios-opacidad').addEventListener('input', () => {
+  $('predios-opacidad-val').textContent = `${$('predios-opacidad').value} %`;
+  if (map.getLayer('predios')) map.setPaintProperty('predios', 'raster-opacity', Number($('predios-opacidad').value) / 100);
+});
+
+function dibujarPredio(geometria) {
+  const fc = geometria ? { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: geometria, properties: {} }] } : VACIO;
+  if (map.getSource('predio')) map.getSource('predio').setData(fc);
+}
+
+function textoPredio(p, anio) {
+  const fuente = `CIREN ${p.capa?.anio || anio || ''}`.trim();
+  return `Predio rol ${p.rol || 'sin rol'} · ${titulo(p.comuna) || '—'} (${fuente})`;
+}
+
+async function htmlPredioPunto(lat, lng) {
+  let d;
+  try {
+    d = await getJSON(`api/v1/predio/punto?region=${encodeURIComponent(estado.region)}&lat=${lat.toFixed(6)}&lon=${lng.toFixed(6)}`);
+  } catch (err) {
+    return `<span class="muted">Predios CIREN: ${SIN_DATOS}</span>`;
+  }
+  if (d.estado === 'sin_predio') { dibujarPredio(null); return '<span class="muted">Sin predio CIREN en este punto</span>'; }
+  if (d.estado !== 'ok') return `<span class="muted">Predios CIREN: ${SIN_DATOS}</span>`;
+  dibujarPredio(d.geometria);
+  let planes;
+  if (d.saff?.estado !== 'ok') planes = `Planes SAFF: ${SIN_DATOS}`;
+  else if (!d.rol_norm) planes = 'Rol no numérico: no se cruza con SAFF';
+  else if (!d.planes_saff) planes = 'Sin planes SAFF para este rol';
+  else {
+    const lista = d.planes.slice(0, 5).map((p) => `${esc(p.nro_solicitud || 's/n')}${p.aprobado ? ' (aprobado)' : ''}`).join(', ');
+    planes = `<b>${d.planes_saff}</b> plan(es) SAFF para este rol: ${lista}${d.planes.length > 5 ? '…' : ''}`;
+  }
+  return `<b>Rol ${esc(d.rol || '—')}</b> · ${esc(titulo(d.comuna) || '—')}
+    <br>${planes}
+    <br><span class="muted chico">Predios rurales CIREN ${esc(d.capa?.anio || '')} · comuna SUBDERE ${esc(d.comudere || '—')}</span>`;
+}
 
 let leyendaCiren = null;
 async function cargarLeyendaCiren(layerId) {
@@ -218,26 +303,32 @@ async function cargarLeyendaCiren(layerId) {
   }
 }
 
-let ignorarClickHasta = 0;
-map.on('click', async (ev) => {
-  if (Date.now() < ignorarClickHasta || !$('ciren-on').checked || !estado.region) return;
-  if (map.queryRenderedFeatures(ev.point, { layers: ['referencias', 'cambios-relleno'] }).length) return;
-  const { lng, lat } = ev.lngLat;
-  const popup = new maplibregl.Popup({ maxWidth: '280px' }).setLngLat(ev.lngLat).setHTML('<span class="muted">Consultando CIREN…</span>').addTo(map);
+async function htmlCirenPunto(lat, lng) {
   try {
     const d = await getJSON(`api/v1/ciren/punto?region=${encodeURIComponent(estado.region)}&lat=${lat.toFixed(6)}&lon=${lng.toFixed(6)}`);
     if (d.estado === 'ok') {
-      popup.setHTML(`<b>${esc(d.uso)}</b><br>${esc(d.subuso || '')}${d.uso_tierra ? `<br><span class="muted">${esc(d.uso_tierra)}</span>` : ''}
+      return `<b>${esc(d.uso)}</b><br>${esc(d.subuso || '')}${d.uso_tierra ? `<br><span class="muted">${esc(d.uso_tierra)}</span>` : ''}
         <br>Superficie polígono: ${ha(d.superf_ha)}<br>Comuna: ${esc(d.nom_com || '—')}
-        <br><span class="muted chico">CIREN capa ${esc(d.capa?.id)}${d.capa?.anio ? ` · CONAF ${esc(d.capa.anio)}` : ''}</span>`);
-    } else if (d.estado === 'sin_poligono') {
-      popup.setHTML(`<span class="muted">${esc(d.mensaje)}</span>`);
-    } else {
-      popup.setHTML(`<span class="muted">CIREN: ${SIN_DATOS}</span>`);
+        <br><span class="muted chico">CIREN capa ${esc(d.capa?.id)}${d.capa?.anio ? ` · CONAF ${esc(d.capa.anio)}` : ''}</span>`;
     }
-  } catch (err) {
-    popup.setHTML(`<span class="muted">CIREN: ${SIN_DATOS}</span>`);
-  }
+    if (d.estado === 'sin_poligono') return `<span class="muted">${esc(d.mensaje)}</span>`;
+  } catch (err) { /* cae al mensaje sin datos */ }
+  return `<span class="muted">CIREN: ${SIN_DATOS}</span>`;
+}
+
+let ignorarClickHasta = 0;
+map.on('click', async (ev) => {
+  const conCiren = $('ciren-on').checked;
+  const conPredios = $('predios-on').checked;
+  if (Date.now() < ignorarClickHasta || (!conCiren && !conPredios) || !estado.region) return;
+  if (map.queryRenderedFeatures(ev.point, { layers: ['referencias', 'cambios-relleno'] }).length) return;
+  const { lng, lat } = ev.lngLat;
+  const popup = new maplibregl.Popup({ maxWidth: '300px' }).setLngLat(ev.lngLat).setHTML('<span class="muted">Consultando CIREN…</span>').addTo(map);
+  const partes = await Promise.all([
+    conPredios ? htmlPredioPunto(lat, lng) : '',
+    conCiren ? htmlCirenPunto(lat, lng) : '',
+  ]);
+  popup.setHTML(partes.filter(Boolean).join('<hr class="sep">'));
 });
 
 /* ---------- NDVI Sentinel-2 ---------- */
@@ -334,6 +425,8 @@ function cambiarRegion() {
   $('ciren-anio').textContent = r.ciren_anio ? String(r.ciren_anio) : '';
   ponerCapaCiren(r.ciren_layer);
   cargarLeyendaCiren(r.ciren_layer);
+  $('predios-anio').textContent = r.predios_anio ? `(CIREN ${r.predios_anio})` : '(CIREN)';
+  ponerCapaPredios(r.predios_layer);
   const [w, s, e, n] = r.bbox;
   if (!vistaEnUrl) map.fitBounds([[w, s], [e, n]], { padding: 20, animate: false });
   vistaEnUrl = false;
@@ -364,6 +457,13 @@ function pintarCambiosMapa() {
   if (map.getSource('cambios')) map.getSource('cambios').setData(geojsonCambios());
 }
 
+function rolTarjeta(r) {
+  const p = r.predio || {};
+  if (p.estado === 'ok') return `Rol ${esc(p.rol || 'sin rol')}`;
+  if (p.estado === 'sin_predio') return 'Sin predio CIREN';
+  return 'Rol: sin datos';
+}
+
 function tarjetaPoligono(r, i) {
   const e = estadoDe(r);
   const inf = infoEstado(e);
@@ -373,7 +473,7 @@ function tarjetaPoligono(r, i) {
   el.dataset.i = i;
   el.innerHTML = `
     <span class="n" style="background:${inf.color}">${i + 1}</span>
-    <span class="fila"><span class="chip ${esc(e)}">${esc(inf.etq)}</span><b>${esc(r.subuso || r.uso || 'Bosque')}</b><span class="muted">${ha(r.superf_ha)}</span><span class="coords">CIREN ${esc(r.id)}</span></span>
+    <span class="fila"><span class="chip ${esc(e)}">${esc(inf.etq)}</span><b>${esc(r.subuso || r.uso || 'Bosque')}</b><span class="muted">${ha(r.superf_ha)}</span><span class="coords">${rolTarjeta(r)}</span><span class="coords">CIREN ${esc(r.id)}</span></span>
     <span class="fila ndvi">NDVI t0 <b>${f3(r.ndvi_t0)}</b> · t1 <b>${f3(r.ndvi_t1)}</b> · Δ <b style="color:#c0392b">${f3(r.delta)}</b></span>
     <span class="fila motivo">${esc(r.motivo || '')}</span>`;
   el.addEventListener('click', () => seleccionar(i));
@@ -414,6 +514,7 @@ function textoResumen(d) {
   if (s.sin_ndvi) partes.push(`${s.sin_ndvi.toLocaleString('es-CL')} sin NDVI (nubes, sin imagen o sin respuesta de GEE).`);
   if (d.gee?.estado === 'parcial') partes.push(`per_api_gee no respondió en ${d.gee.lotes_fallidos} de ${d.gee.lotes} lotes.`);
   if (d.saff?.estado !== 'ok') partes.push(`SAFF: ${SIN_DATOS} (se está cargando); los cambios quedan «sin datos».`);
+  if (d.predios?.estado !== 'ok') partes.push(`Predios CIREN: ${SIN_DATOS} (se están cargando); sin rol los cambios quedan «sin datos».`);
   return partes.join(' ');
 }
 
@@ -542,6 +643,7 @@ function limpiarFichaMapa() {
   const vacio = { type: 'FeatureCollection', features: [] };
   if (map.getSource('rodales')) map.getSource('rodales').setData(vacio);
   if (map.getSource('referencias')) map.getSource('referencias').setData(vacio);
+  dibujarPredio(null);
 }
 
 function filaDato(dt, dd) {
@@ -551,12 +653,15 @@ function filaDato(dt, dd) {
 function tarjetaPlan(p) {
   const u = p.ubicacion || {};
   const sig = p.sigcra || {};
-  let rodales = 'No consultado (solo los 5 planes más cercanos)';
+  let rodales = 'No consultado (solo los 5 primeros planes)';
   if (sig.estado === 'ok') rodales = `${sig.rodales} rodal(es)${p.punto_en_rodal ? ` · el punto está dentro del rodal ${esc(p.punto_en_rodal)}` : ''}`;
   else if (sig.estado === 'sin_datos') rodales = `SIGCRA: ${SIN_DATOS}`;
-  const ubic = `${num(p.dist_km, 2)} km${u.aproximada ? ' · ubicación aproximada (datum no WGS84/SIRGAS)' : ''}${u.huso_inferido ? ` · huso ${u.huso} inferido` : ''}`;
-  return `<article class="plan${p.punto_en_rodal ? ' dentro' : ''}">
-    <h3>Plan ${esc(p['Nro.Solicitud'] || '—')} <span class="chip${p.aprobado ? '' : ' sin_datos'}">${esc(p['Estdo Solicitud'] || 'Sin estado')}</span></h3>
+  const ubic = p.ubicacion
+    ? `${num(p.dist_km, 2)} km${u.aproximada ? ' · ubicación aproximada (datum no WGS84/SIRGAS)' : ''}${u.huso_inferido ? ` · huso ${u.huso} inferido` : ''}`
+    : 'sin coordenadas convertibles';
+  const aprobadoT1 = p.aprobado_a_t1 ? ' <span class="chip">Aprobado a t1</span>' : '';
+  return `<article class="plan${p.punto_en_rodal ? ' dentro' : ''}${p.mismo_rol ? ' mismo-rol' : ''}">
+    <h3>Plan ${esc(p['Nro.Solicitud'] || '—')} <span class="chip${p.aprobado ? '' : ' sin_datos'}">${esc(p['Estdo Solicitud'] || 'Sin estado')}</span>${p.mismo_rol ? aprobadoT1 : ''}</h3>
     <dl>
       ${filaDato('Tipo', esc(p['Tipo Solicitud Compl'] || '—'))}
       ${filaDato('Ingreso', fechaCL(p['Fec.Ingreso']))}
@@ -575,8 +680,20 @@ function tarjetaPlan(p) {
 
 function claseConclusion(f) {
   if (f.saff?.estado !== 'ok') return 'sin_datos';
-  if (!f.planes?.length) return 'alerta';
+  const e = f.estado_cambio?.estado;
+  if (e) return e === 'en_regla' ? '' : (e === 'alerta' ? 'alerta' : 'sin_datos');
+  if (!f.planes?.length && !f.planes_rol?.length) return 'alerta';
   return '';
+}
+
+function htmlPredioFicha(p) {
+  const anio = estado.regiones[estado.region]?.predios_anio;
+  if (p?.estado === 'ok') {
+    const sinRol = p.rol_norm ? '' : ' <span class="muted chico">(rol no numérico: no se cruza con SAFF)</span>';
+    return `<p class="predio-ficha">${esc(textoPredio(p, anio))}${sinRol}</p>`;
+  }
+  if (p?.estado === 'sin_predio') return '<p class="aviso">Sin predio CIREN en el centroide.</p>';
+  return `<p class="aviso">Predios CIREN: ${SIN_DATOS}.</p>`;
 }
 
 async function cargarFicha(i) {
@@ -585,7 +702,7 @@ async function cargarFicha(i) {
   $('ficha').hidden = false;
   $('ficha-titulo').textContent = `Ficha del polígono ${i + 1} · CIREN ${r.id}`;
   const cuerpo = $('ficha-cuerpo');
-  cuerpo.innerHTML = '<p class="msg">Buscando planes de manejo (SAFF) y rodales (SIGCRA) desde el centroide…</p>';
+  cuerpo.innerHTML = '<p class="msg">Buscando predio (CIREN), planes de manejo (SAFF) y rodales (SIGCRA) desde el centroide…</p>';
   limpiarFichaMapa();
   $('ficha').scrollIntoView({ block: 'nearest' });
   const c = estado.consulta || consultaActual();
@@ -604,17 +721,24 @@ async function cargarFicha(i) {
   if (f.sigcra?.estado === 'parcial') avisos.push('SIGCRA respondió solo para algunos planes.');
   if (f.saff?.truncado) avisos.push('La carga SAFF llegó al máximo de páginas; podría faltar algún plan.');
 
+  const planesRol = f.planes_rol || [];
+  const rolNorm = f.predio?.rol_norm;
   cuerpo.innerHTML = `
+    ${htmlPredioFicha(f.predio)}
     <div class="conclusion ${claseConclusion(f)}">${esc(f.conclusion)}</div>
     ${avisos.map((a) => `<p class="aviso">${esc(a)}</p>`).join('')}
     <p class="chico muted">Estado del cambio: <span class="chip ${esc(estadoDe(r))}">${esc(infoEstado(estadoDe(r)).etq)}</span>${r.motivo ? ` ${esc(r.motivo)}` : ''}</p>
     <p class="chico muted">${esc(r.subuso || r.uso || 'Bosque')} · ${ha(r.superf_ha)} · NDVI ${f3(r.ndvi_t0)} → ${f3(r.ndvi_t1)} (Δ ${f3(r.delta)}).
       Centroide ${r.centroide.lat.toFixed(5)}, ${r.centroide.lon.toFixed(5)}: el cruce con rodales se evalúa en ese punto.</p>
+    ${rolNorm && f.saff?.estado === 'ok' ? `<h3 class="sub">Planes SAFF del rol ${esc(rolNorm)} (${planesRol.length})</h3>
+      ${planesRol.length ? `<div class="planes">${planesRol.map(tarjetaPlan).join('')}</div>` : '<p class="chico muted">Ningún plan SAFF con este rol en los últimos 10 años.</p>'}` : ''}
+    ${f.saff?.estado === 'ok' ? `<h3 class="sub">Planes cercanos a 3 km (${(f.planes || []).length})</h3>` : ''}
     <p class="chico muted">${esc(f.nota_cercania)}${f.saff?.periodo ? ` Planes con resolución entre ${fechaCL(f.saff.periodo.desde)} y ${fechaCL(f.saff.periodo.hasta)}.` : ''}</p>
     <div class="planes">${(f.planes || []).map(tarjetaPlan).join('')}</div>`;
 
+  dibujarPredio(f.predio?.geometry || null);
   if (map.getSource('rodales')) map.getSource('rodales').setData(f.rodales || { type: 'FeatureCollection', features: [] });
-  const refs = (f.planes || []).filter((p) => p.ubicacion).map((p) => ({
+  const refs = [...planesRol, ...(f.planes || [])].filter((p) => p.ubicacion).map((p) => ({
     type: 'Feature',
     geometry: { type: 'Point', coordinates: [p.ubicacion.lon, p.ubicacion.lat] },
     properties: { plan: p['Nro.Solicitud'] || '' },
@@ -785,6 +909,10 @@ mapaListo.then(() => {
   if (params.get('ciren') === '0') {
     $('ciren-on').checked = false;
     $('ciren-on').dispatchEvent(new Event('change'));
+  }
+  if (params.get('predios') === '1') {
+    $('predios-on').checked = true;
+    $('predios-on').dispatchEvent(new Event('change'));
   }
 });
 cargarRegiones();

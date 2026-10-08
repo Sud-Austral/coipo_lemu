@@ -1,16 +1,18 @@
-"""Orquesta la deteccion por poligonos: bosque CIREN -> NDVI zonal (GEE) -> estado SAFF.
+"""Orquesta la deteccion por poligonos: bosque CIREN -> NDVI zonal (GEE) -> predio CIREN -> estado SAFF.
 
 1. Poligonos de bosque CIREN de la comuna (zonas_ciren, cache 7 dias).
 2. NDVI medio t0/t1 por poligono en per_api_gee /v1/zonal/ndvi-change, en
    lotes de <= 1000 con concurrencia 3. Tarda: corre como tarea en segundo
    plano y el endpoint responde de inmediato con el avance.
-3. Poligonos con caida de NDVI (cambio_vegetacion) -> estado preliminar con
-   los planes SAFF ya cargados en memoria (lista_negra.evaluar_cercania). El
-   cruce con rodales SIGCRA se hace al abrir la ficha del poligono.
+3. Poligonos con caida de NDVI (cambio_vegetacion) -> predio CIREN que
+   contiene el centroide (predios_ciren, cache 7 dias) -> estado con los
+   planes SAFF ya cargados en memoria: por rol y, de respaldo, por cercania
+   (lista_negra.evaluar). El cruce con rodales SIGCRA se hace al abrir la
+   ficha del poligono.
 
-El NDVI se cachea 6 h por (region, t0, t1, cloud, min_ha); el estado SAFF se
-recalcula en cada respuesta (es barato) para recoger la carga SAFF apenas
-termina.
+El NDVI se cachea 6 h por (region, t0, t1, cloud, min_ha); predio y estado
+SAFF se recalculan en cada respuesta (es barato) para recoger las cargas
+apenas terminan.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from app.clientes import gee
-from app.logica import cambio_vegetacion, ficha_punto, lista_negra, zonas_ciren
+from app.logica import cambio_vegetacion, ficha_punto, lista_negra, predios_ciren, rol, zonas_ciren
 
 CACHE_TTL_S = 6 * 3600
 CACHE_FALLA_TTL_S = 120  # si GEE fallo: lo justo para que el polling lea el resultado
@@ -31,7 +33,9 @@ SIN_DATOS = "Sin datos por el momento"
 
 # Regiones de deteccion: la comuna define los poligonos CIREN y el filtro SAFF.
 # - comuna: filtro de nom_com en CIREN y de Comuna_Predio en SAFF.
+# - comudere: codigo SUBDERE de la comuna, filtro de los predios CIREN.
 # - ciren_layer: capa del MapServer CIREN USOS_DE_LA_TIERRA__CONAF (12 = Los Rios, CONAF 2024).
+# - predios_layer: capa de IDEMINAGRI/PROPIEDADES_RURALES (11 = Los Rios, CIREN 2018).
 # - bbox: [oeste, sur, este, norte] de la comuna, para teselas Sentinel-2.
 REGIONES = {
     "panguipulli": {
@@ -39,6 +43,9 @@ REGIONES = {
         "comuna": "PANGUIPULLI",
         "ciren_layer": 12,
         "ciren_anio": 2024,
+        "comudere": "14108",
+        "predios_layer": 11,
+        "predios_anio": 2018,
         "centro": (-39.64, -72.2),
         "bbox": (-72.75, -39.95, -71.55, -39.30),
     }
@@ -87,6 +94,7 @@ def _fc(zonas: list[dict]) -> dict:
 async def _calcular(t: Trabajo, config: dict) -> None:
     """NDVI zonal de todos los poligonos; deja en t.ndvi lo necesario para responder."""
     try:
+        predios_ciren.precargar_predios(t.region, config)
         try:
             carga = await zonas_ciren.cargar_zonas(t.region, config)
         except zonas_ciren.ZonasError as exc:
@@ -175,8 +183,13 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
         gee_estado = {"estado": "parcial" if errores else "ok", "lotes": n["lotes"], "lotes_fallidos": len(errores)}
 
     puntos = ficha_punto.planes_ubicados_en_cache(config["comuna"], config["centro"])
+    indice_rol = ficha_punto.indice_rol_en_cache(config["comuna"])
     if puntos is None:
         ficha_punto.precargar_saff(config["comuna"])
+    predios = predios_ciren.predios_en_cache(t.region)
+    if predios is None:
+        predios_ciren.precargar_predios(t.region, config)
+    t1 = date.fromisoformat(t.t1)
 
     con_cambio = []
     sin_ndvi = 0
@@ -192,7 +205,14 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
         cercanos = (
             ficha_punto.contar_cercanos(puntos, c["lat"], c["lon"], RADIO_PLANES_KM) if puntos is not None else None
         )
-        ev = lista_negra.evaluar_cercania(cercanos, RADIO_PLANES_KM)
+        predio = predios_ciren.info_predio(
+            predios_ciren.predio_en_punto(predios, c["lat"], c["lon"]) if predios else None, predios,
+        )
+        planes_rol = [
+            {**p, "aprobado_a_t1": ficha_punto.plan_aprobado(p, t1)}
+            for p in rol.planes_del_predio(indice_rol or {}, predio if predio["estado"] == "ok" else None)
+        ]
+        ev = lista_negra.evaluar(puntos is not None, predio, planes_rol, cercanos or 0, RADIO_PLANES_KM)
         con_cambio.append({
             "id": z["id"],
             "uso": z.get("uso"),
@@ -205,6 +225,8 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
             "estado": ev.estado,
             "motivo": ev.motivo,
             "planes_cercanos": cercanos,
+            "predio": predio,
+            "planes_rol": len(planes_rol) if puntos is not None else None,
             "geometry": z["geometry"],
         })
     con_cambio.sort(key=lambda p: p["delta"])
@@ -235,6 +257,10 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
         "imagenes": n["imagenes"],
         "gee": gee_estado,
         "saff": {"estado": "ok" if puntos is not None else "sin_datos", "planes_ubicados": len(puntos or [])},
+        "predios": (
+            {"estado": "ok", "capa": predios["capa"], "anio": predios.get("anio"), "predios": len(predios["predios"])}
+            if predios else {"estado": "sin_datos"}
+        ),
         "radio_planes_km": RADIO_PLANES_KM,
         "resumen": resumen,
         "poligonos": con_cambio,
@@ -279,6 +305,8 @@ def info_regiones() -> list[dict]:
             "comuna": cfg["comuna"],
             "ciren_layer": cfg["ciren_layer"],
             "ciren_anio": cfg["ciren_anio"],
+            "predios_layer": cfg["predios_layer"],
+            "predios_anio": cfg["predios_anio"],
             "centro": {"lat": cfg["centro"][0], "lon": cfg["centro"][1]},
             "bbox": list(cfg["bbox"]),
             "poligonos_ciren": len(carga["zonas"]) if carga else None,
