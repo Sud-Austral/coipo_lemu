@@ -134,8 +134,9 @@
           <div class="muted chico" id="cmp-fechas"></div>
         </div>
         <div class="segmentado cmp-fuentes" role="group" aria-label="Fuente de imagen de ambos lados">
-          <button type="button" data-cmp-fuente="wayback" aria-pressed="true" class="activo">Alta resolución</button>
+          <button type="button" data-cmp-fuente="wayback" aria-pressed="true" class="activo">Alta resolución (Wayback)</button>
           <button type="button" data-cmp-fuente="sentinel" aria-pressed="false">Sentinel-2 color real</button>
+          <button type="button" data-cmp-fuente="infrarrojo" aria-pressed="false">Sentinel-2 infrarrojo</button>
           <button type="button" data-cmp-fuente="ndvi" aria-pressed="false">NDVI</button>
         </div>
         <button type="button" class="cmp-cerrar" id="cmp-cerrar" aria-label="Cerrar comparador (Esc)">✕</button>
@@ -152,12 +153,20 @@
         </div>
         <div class="cmp-etq izq" id="cmp-etq-a"></div>
         <div class="cmp-etq der" id="cmp-etq-b"></div>
-        <div class="cmp-leyenda-ndvi" id="cmp-leyenda-ndvi" hidden>
-          <div class="gradiente"></div>
-          <div class="gradiente-etq"><span>-1 suelo / agua</span><span>0</span><span>1 veg. densa</span></div>
+        <div class="cmp-leyendas">
+          <div class="cmp-leyenda-ndvi" id="cmp-leyenda-ndvi" hidden>
+            <div class="gradiente"></div>
+            <div class="gradiente-etq"><span>-1 suelo / agua</span><span>0</span><span>1 veg. densa</span></div>
+          </div>
+          <div class="cmp-leyenda-ir" id="cmp-leyenda-ir" hidden>
+            <span><i class="sw-ir veg"></i>Rojo intenso = vegetación sana</span> ·
+            <span><i class="sw-ir suelo"></i>Celeste/café = suelo o corta</span> ·
+            <span><i class="sw-ir agua"></i>Negro = agua</span>
+          </div>
         </div>
       </div>
       <p class="cmp-ayuda">Las fotos de alta resolución son de archivo: su fecha puede no coincidir con t0/t1; se muestra la fecha real de cada una.
+        Sentinel-2 (10 m) se dibuja con suavizado bicúbico: se ve menos cuadriculado, pero no agrega detalle.
         Arrastra la línea o usa ← → para comparar.</p>
     </div>
   </div>

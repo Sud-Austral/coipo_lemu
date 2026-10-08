@@ -1068,8 +1068,12 @@ const FUENTES_CMP = {
   wayback: 'Alta resolución (Wayback)',
   google: 'Google (solo foto actual)',
   sentinel: 'Sentinel-2 color real',
+  infrarrojo: 'Sentinel-2 infrarrojo',
   ndvi: 'NDVI Sentinel-2',
 };
+// Fuentes Sentinel-2 de /api/v1/comparar/sentinel -> su `combinacion`.
+const COMBINACION_CMP = { sentinel: 'color_real', infrarrojo: 'infrarrojo' };
+const porCombinacion = (fn) => Object.fromEntries(Object.keys(COMBINACION_CMP).map((f) => [f, fn()]));
 
 const cmp = {
   i: null,
@@ -1081,10 +1085,11 @@ const cmp = {
   lados: { a: { fuente: 'wayback', captura: null }, b: { fuente: 'wayback', captura: null } },
   capturas: null,      // null = buscando; [] = ninguna
   avance: '',
-  sentinel: null,      // respuesta de /api/v1/comparar/sentinel (null = sin pedir o cargando)
-  escenas: { t0: null, t1: null },  // escena Sentinel-2 elegida a mano por lado (null = automática)
-  sentinelCargando: new Set(),      // lados ('t0'/'t1') con una escena elegida a mano en camino
-  sentinelSerie: 0,
+  // Por fuente Sentinel (sentinel = color real, infrarrojo):
+  sentinel: porCombinacion(() => null),              // respuesta de /api/v1/comparar/sentinel (null = sin pedir o cargando)
+  sentinelCargando: porCombinacion(() => new Set()), // lados ('t0'/'t1') con una escena elegida a mano en camino
+  sentinelSerie: porCombinacion(() => 0),
+  escenas: { t0: null, t1: null },  // escena Sentinel-2 elegida a mano por lado (null = automática), común a ambas combinaciones
   ndvi: undefined,     // undefined = sin pedir o cargando; null = falló
   pidiendo: new Set(),
   volverFoco: null,
@@ -1274,24 +1279,32 @@ function infoLado(l) {
       linea: `${nombre} · Google · fecha no informada`, detalle: 'Foto actual de Google; no se conoce su fecha de captura',
     };
   }
-  if (lado.fuente === 'sentinel') {
-    const linea = `${nombre} · Sentinel-2 color real`;
-    if (cmp.sentinel === null) return { estado: 'cargando', linea, detalle: 'Buscando la escena con menos nubes sobre el polígono (±15, ±30 y ±60 días)…' };
-    if (cmp.sentinelCargando.has(ref)) return { estado: 'cargando', linea, detalle: `Cargando la escena del ${fechaCL(cmp.escenas[ref])}…` };
-    const s = cmp.sentinel[ref];
-    if (!s || s.estado !== 'ok') return { estado: 'sin', linea, detalle: (s && s.mensaje) || cmp.sentinel.mensaje || SIN_DATOS };
+  if (COMBINACION_CMP[lado.fuente]) {
+    const f = lado.fuente;
+    const ir = f === 'infrarrojo';
+    const nombreFuente = ir ? 'Sentinel-2 infrarrojo' : 'Sentinel-2';
+    const linea = `${nombre} · ${FUENTES_CMP[f]}`;
+    const datos = cmp.sentinel[f];
+    if (datos === null) return { estado: 'cargando', linea, detalle: 'Buscando la escena con menos nubes sobre el polígono (±15, ±30 y ±60 días)…' };
+    if (cmp.sentinelCargando[f].has(ref)) return { estado: 'cargando', linea, detalle: `Cargando la escena del ${fechaCL(cmp.escenas[ref])}…` };
+    const s = datos[ref];
+    if (!s || s.estado !== 'ok') return { estado: 'sin', linea, detalle: (s && s.mensaje) || datos.mensaje || SIN_DATOS };
     const fecha = s.fecha_escena || (s.fecha_min === s.fecha_max ? s.fecha_min : null);
-    const partes = [`${nombre} · Sentinel-2`, fecha ? `escena ${fechaCL(fecha)}` : 'fecha de escena no informada'];
+    const partes = [`${nombre} · ${nombreFuente}`, fecha ? `escena ${fechaCL(fecha)}` : 'fecha de escena no informada'];
     if (s.nubes_pct !== null && s.nubes_pct !== undefined) partes.push(`${pctNubes(s.nubes_pct)} nubes sobre el polígono`);
     if (fecha) partes.push(difDias(fecha, fechaRef, ref));
     const detalle = [];
     if (s.eleccion === 'manual') detalle.push('escena elegida a mano');
-    else if (s.limpia === false) detalle.push(`ninguna escena con ≤ ${cmp.sentinel.nubes_max_pct ?? 10} % de nubes a ±${s.ventana?.dias ?? '—'} d: se muestra la menos nublada`);
+    else if (s.limpia === false) detalle.push(`ninguna escena con ≤ ${datos.nubes_max_pct ?? 10} % de nubes a ±${s.ventana?.dias ?? '—'} d: se muestra la menos nublada`);
     else detalle.push(`la más limpia a ±${s.ventana?.dias ?? '—'} d`);
+    // Contraste: igual en ambos lados solo si el backend pudo aplicar el rango común.
+    if (s.estiramiento_comun) detalle.push('contraste ajustado a la zona, igual en ambos lados');
+    else if (s.estiramiento?.modo === 'local') detalle.push('contraste ajustado a la zona solo en este lado');
+    else if (s.estiramiento) detalle.push('contraste fijo');
     if (s.nubes_pct > 0) detalle.push('zonas sin dato por nubes (fondo oscuro)');
     if (s.incompleto) detalle.push('per_api_gee no respondió al ampliar la ventana');
     return {
-      estado: 'ok', tiles: [s.tile_url], maxzoom: 20, atribucion: 'Copernicus Sentinel-2 vía Google Earth Engine · Cloud Score+',
+      estado: 'ok', tiles: [s.tile_url], maxzoom: 20, atribucion: 'Copernicus Sentinel-2 vía Google Earth Engine · Cloud Score+', ir,
       linea: partes.join(' · '), detalle: detalle.join(' · '),
     };
   }
@@ -1322,8 +1335,10 @@ function opcionesCapturaLado(l) {
 // Candidatas Sentinel-2 del lado (fecha · % nubes sobre el polígono), para elegir otra escena a mano.
 function selectorEscenas(l) {
   const { ref, nombre } = LADOS[l];
-  const s = cmp.sentinel && cmp.sentinel[ref];
-  if (cmp.lados[l].fuente !== 'sentinel' || cmp.sentinelCargando.has(ref) || !s) return '';
+  const f = cmp.lados[l].fuente;
+  if (!COMBINACION_CMP[f] || cmp.sentinelCargando[f].has(ref)) return '';
+  const s = cmp.sentinel[f] && cmp.sentinel[f][ref];
+  if (!s) return '';
   const cands = s.candidatas || [];
   if (cands.length < 2) return '';
   const actual = s.fecha_escena || s.escena_pedida;  // si la escena elegida no cargó, sigue marcada para poder cambiarla
@@ -1376,11 +1391,12 @@ function pintarComparador() {
     btn.setAttribute('aria-pressed', String(activo));
   });
   $('cmp-leyenda-ndvi').hidden = !(infos.a.ndvi || infos.b.ndvi);
+  $('cmp-leyenda-ir').hidden = !(infos.a.ir || infos.b.ir);
   const usaWayback = a.fuente === 'wayback' || b.fuente === 'wayback';
   const misma = a.fuente === 'wayback' && b.fuente === 'wayback' && cmp.capturas?.length && a.captura === b.captura;
   const ninguna = usaWayback && cmp.capturas && !cmp.capturas.length;
   const aviso = $('cmp-aviso');
-  const auto = cmp.autoSentinel && (a.fuente === 'sentinel' || b.fuente === 'sentinel');
+  const auto = cmp.autoSentinel && (COMBINACION_CMP[a.fuente] || COMBINACION_CMP[b.fuente]);
   if (auto) {
     aviso.hidden = false;
     aviso.innerHTML = `<span>${esc(cmp.autoSentinel)}</span>
@@ -1395,29 +1411,41 @@ function pintarComparador() {
   $('cmp-usar-sentinel').addEventListener('click', () => usarFuente('sentinel'));
 }
 
-async function cargarSentinelCmp(pedido) {
+// f: 'sentinel' (color real) o 'infrarrojo'. El backend iguala el contraste de t0 y t1.
+async function cargarSentinelCmp(pedido, f) {
   const r = estado.resultados[cmp.i];
   const c = cmp.consulta;
-  const serie = ++cmp.sentinelSerie;
+  const serie = ++cmp.sentinelSerie[f];
   const elegidas = ['t0', 't1'].filter((ref) => cmp.escenas[ref]).map((ref) => `&escena_${ref}=${cmp.escenas[ref]}`).join('');
   let d;
   try {
-    d = await getJSON(`api/v1/comparar/sentinel?region=${encodeURIComponent(c.region)}&id=${encodeURIComponent(r.id)}&t0=${c.t0}&t1=${c.t1}&cloud=${encodeURIComponent(c.cloud || 80)}${elegidas}`);
+    d = await getJSON(`api/v1/comparar/sentinel?region=${encodeURIComponent(c.region)}&id=${encodeURIComponent(r.id)}&t0=${c.t0}&t1=${c.t1}&cloud=${encodeURIComponent(c.cloud || 80)}&combinacion=${COMBINACION_CMP[f]}${elegidas}`);
   } catch (err) {
     d = { estado: 'sin_datos', mensaje: `Sentinel-2: ${SIN_DATOS}` };
   }
-  if (pedido !== cmp.pedido || serie !== cmp.sentinelSerie) return;
-  cmp.sentinel = d;
-  cmp.sentinelCargando.clear();
+  if (pedido !== cmp.pedido || serie !== cmp.sentinelSerie[f]) return;
+  cmp.sentinel[f] = d;
+  cmp.sentinelCargando[f].clear();
   pintarComparador();
 }
 
-// Escena elegida a mano en un lado: se vuelve a pedir (el otro lado sale de la cache del backend).
+// Escena elegida a mano en un lado (vale para color real e infrarrojo): se
+// vuelven a pedir las combinaciones en uso (el otro lado sale de la cache del
+// backend); las que no están en uso se olvidan y se piden al usarlas.
 function elegirEscena(l, fecha) {
   const { ref } = LADOS[l];
   cmp.escenas[ref] = fecha;
-  cmp.sentinelCargando.add(ref);
-  cargarSentinelCmp(cmp.pedido);
+  const usadas = new Set([cmp.lados.a.fuente, cmp.lados.b.fuente]);
+  Object.keys(COMBINACION_CMP).forEach((f) => {
+    if (usadas.has(f)) {
+      cmp.sentinelCargando[f].add(ref);
+      cargarSentinelCmp(cmp.pedido, f);
+    } else {
+      cmp.sentinelSerie[f] += 1;  // descarta una respuesta en camino con la escena anterior
+      cmp.sentinel[f] = null;
+      cmp.pidiendo.delete(f);
+    }
+  });
 }
 
 async function cargarNdviCmp(pedido) {
@@ -1430,10 +1458,12 @@ async function cargarNdviCmp(pedido) {
 // Pide solo los datos de las fuentes elegidas (Sentinel y NDVI se piden al usarlas).
 function cargarFuentesCmp() {
   const usadas = new Set([cmp.lados.a.fuente, cmp.lados.b.fuente]);
-  if (usadas.has('sentinel') && !cmp.pidiendo.has('sentinel')) {
-    cmp.pidiendo.add('sentinel');
-    cargarSentinelCmp(cmp.pedido);
-  }
+  Object.keys(COMBINACION_CMP).forEach((f) => {
+    if (usadas.has(f) && !cmp.pidiendo.has(f)) {
+      cmp.pidiendo.add(f);
+      cargarSentinelCmp(cmp.pedido, f);
+    }
+  });
   if (usadas.has('ndvi') && !cmp.pidiendo.has('ndvi')) {
     cmp.pidiendo.add('ndvi');
     cargarNdviCmp(cmp.pedido);
@@ -1490,9 +1520,9 @@ async function abrirComparador(i) {
     lados: { a: { fuente: 'wayback', captura: null }, b: { fuente: 'wayback', captura: null } },
     capturas: null,
     avance: '',
-    sentinel: null,
+    sentinel: porCombinacion(() => null),
     escenas: { t0: null, t1: null },
-    sentinelCargando: new Set(),
+    sentinelCargando: porCombinacion(() => new Set()),
     ndvi: undefined,
     pidiendo: new Set(),
     autoSentinel: null,

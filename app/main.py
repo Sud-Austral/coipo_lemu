@@ -8,6 +8,7 @@ rodales del plan (per_api_sigcra, al abrir la ficha) -> estado del poligono.
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -99,8 +100,9 @@ async def comparar_sentinel(
     cloud: int = Query(orquestador.CLOUD_ESCENA_DEFECTO, ge=0, le=100, description="Tope de nubosidad de la escena completa"),
     escena_t0: date | None = Query(None, description="Fecha de escena elegida a mano para t0"),
     escena_t1: date | None = Query(None, description="Fecha de escena elegida a mano para t1"),
+    combinacion: Literal["color_real", "infrarrojo"] = Query("color_real", description="color_real (B4/B3/B2) o infrarrojo (B8/B4/B3)"),
 ):
-    """Sentinel-2 color real del poligono en t0 y t1: escena mas limpia sobre el poligono (+-15/30/60 dias)."""
+    """Sentinel-2 del poligono en t0 y t1: escena mas limpia sobre el poligono (+-15/30/60 dias), mismo contraste en ambos lados."""
     config = _region(region)
     if t0 >= t1:
         raise HTTPException(status_code=400, detail="t0_debe_ser_anterior_a_t1")
@@ -108,6 +110,7 @@ async def comparar_sentinel(
         return await comparar.sentinel(
             region, config, id, t0.isoformat(), t1.isoformat(), cloud,
             escena_t0.isoformat() if escena_t0 else None, escena_t1.isoformat() if escena_t1 else None,
+            combinacion,
         )
     except Exception as exc:  # noqa: BLE001 - el comparador nunca responde 500
         return {"region": region, "id": id, "estado": "sin_datos", "mensaje": "Sin datos por el momento",

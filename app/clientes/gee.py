@@ -117,21 +117,30 @@ async def tiles_ndvi(start: str, end: str, west: float, south: float, east: floa
         raise GeeError("gee_respuesta_invalida") from exc
 
 
-async def tiles_rgb(start: str, end: str, geometry: dict, cloud: int = 40, fecha_objetivo: str | None = None) -> dict:
-    """Teselas Sentinel-2 color real de la escena mas limpia sobre `geometry` (POST /v1/tiles/rgb).
+async def tiles_rgb(
+    start: str, end: str, geometry: dict, cloud: int = 40, fecha_objetivo: str | None = None,
+    combinacion: str = "color_real", estiramiento_min: list | None = None, estiramiento_max: list | None = None,
+) -> dict:
+    """Teselas Sentinel-2 de la escena mas limpia sobre `geometry` (POST /v1/tiles/rgb).
 
     escena 'mas_limpia' + mascara 'cs_plus' + recortar false: la fecha de
     pasada con menos nubes (Cloud Score+) sobre el poligono, sin recortar la
-    tesela y con los pixeles nublados transparentes. Devuelve {tile_url,
-    images, fecha_escena, nubes_pct, candidatas:[{fecha, nubes_pct}],
-    fecha_min, fecha_max, ventana}. Sin escenas en la ventana -> GeeError
+    tesela y con los pixeles nublados transparentes. Siempre con remuestreo
+    bicubico y contraste local (percentiles 2-98 del poligono + 1,5 km), o el
+    rango `estiramiento_min/max` si viene. `combinacion`: 'color_real' o
+    'infrarrojo' (B8/B4/B3). Devuelve {tile_url, images, fecha_escena,
+    nubes_pct, candidatas:[{fecha, nubes_pct}], fecha_min, fecha_max, ventana,
+    estiramiento:{modo, min, max}}. Sin escenas en la ventana -> GeeError
     gee_sin_imagenes.
     """
     url = f"{GEE_BASE_URL}/v1/tiles/rgb"
     body = {
         "geometry": geometry, "start": start, "end": end, "cloud": cloud,
         "escena": "mas_limpia", "mascara": "cs_plus", "recortar": False, "fecha_objetivo": fecha_objetivo,
+        "combinacion": combinacion, "remuestreo": "bicubico", "estiramiento": "local",
     }
+    if estiramiento_min is not None and estiramiento_max is not None:
+        body.update(estiramiento_min=list(estiramiento_min), estiramiento_max=list(estiramiento_max))
     headers = {"X-API-Key": GEE_API_KEY}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:

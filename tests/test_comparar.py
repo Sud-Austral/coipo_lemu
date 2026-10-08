@@ -40,7 +40,7 @@ def _escena(fecha, nubes, candidatas=None):
 async def test_ventana_se_agranda_hasta_escena_limpia(zonas, monkeypatch):
     pedidos = []
 
-    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None):
+    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None, **kw):
         pedidos.append((start, end, fecha_objetivo))
         assert geometry == CUADRADO
         # t0 (2026-07-01): +-15 sin escenas, +-30 solo con 40 % de nubes, +-60 con una al 3 %.
@@ -71,7 +71,7 @@ async def test_ventana_se_agranda_hasta_escena_limpia(zonas, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sin_escena_limpia_queda_la_mejor(zonas, monkeypatch):
-    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None):
+    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None, **kw):
         return _escena("2026-07-05", {15: 60.0, 30: 35.0, 60: 22.0}[(date.fromisoformat(end) - date.fromisoformat(start)).days // 2])
 
     monkeypatch.setattr(gee, "tiles_rgb", fake_rgb)
@@ -83,7 +83,7 @@ async def test_sin_escena_limpia_queda_la_mejor(zonas, monkeypatch):
 async def test_escena_elegida_a_mano(zonas, monkeypatch):
     pedidos = []
 
-    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None):
+    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None, **kw):
         pedidos.append((start, end))
         if start == "2026-07-20":
             return _escena("2026-07-20", 18.0)
@@ -105,7 +105,7 @@ async def test_escena_elegida_a_mano(zonas, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gee_caido_al_agrandar_muestra_lo_encontrado_sin_cache(zonas, monkeypatch):
-    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None):
+    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None, **kw):
         if (date.fromisoformat(end) - date.fromisoformat(start)).days == 30:
             return _escena("2026-07-03", 50.0)
         raise gee.GeeError("gee_error_502")
@@ -162,3 +162,142 @@ def test_endpoint_nunca_500(monkeypatch):
     assert r.status_code == 200 and r.json()["estado"] == "sin_datos"
     assert c.get("/api/v1/comparar/sentinel?region=panguipulli&id=7&t0=2026-09-01&t1=2026-07-01").status_code == 400
     assert c.get("/api/v1/comparar/sentinel?region=nada&id=7&t0=2026-07-01&t1=2026-09-01").status_code == 404
+    assert c.get("/api/v1/comparar/sentinel?region=panguipulli&id=7&t0=2026-07-01&t1=2026-09-01&combinacion=swir").status_code == 422
+
+
+def test_endpoint_pasa_combinacion(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    recibido = {}
+
+    async def fake(*args, **kwargs):
+        recibido["args"] = args
+        return {"estado": "ok"}
+
+    monkeypatch.setattr(comparar, "sentinel", fake)
+    c = TestClient(main.app)
+    c.get("/api/v1/comparar/sentinel?region=panguipulli&id=7&t0=2026-07-01&t1=2026-09-01&combinacion=infrarrojo")
+    assert recibido["args"][-1] == "infrarrojo"
+    c.get("/api/v1/comparar/sentinel?region=panguipulli&id=7&t0=2026-07-01&t1=2026-09-01")
+    assert recibido["args"][-1] == "color_real"
+
+
+# --- contraste local con rango comun t0/t1 (doble pasada) ---
+
+def _local(fecha, mins, maxs):
+    return {**_escena(fecha, 2.0), "estiramiento": {"modo": "local", "min": mins, "max": maxs, "gamma": 1.1}}
+
+
+def _fake_doble(pedidos, falla_comun=None):
+    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None, combinacion="color_real",
+                       estiramiento_min=None, estiramiento_max=None):
+        pedidos.append({"start": start, "end": end, "combinacion": combinacion, "min": estiramiento_min, "max": estiramiento_max})
+        if estiramiento_min is not None:  # segunda pasada: la misma escena con el rango comun
+            if start == falla_comun:
+                raise gee.GeeError("gee_error_502")
+            return {**_escena(start, 2.0), "tile_url": f"https://ee/comun/{combinacion}/{start}",
+                    "estiramiento": {"modo": "forzado", "min": estiramiento_min, "max": estiramiento_max, "gamma": 1.1}}
+        if fecha_objetivo == "2026-07-01":
+            return _local("2026-07-05", [300, 400, 200], [1800, 1500, 1200])
+        return _local("2026-08-28", [150, 450, 250], [2600, 1400, 1300])
+
+    return fake_rgb
+
+
+@pytest.mark.asyncio
+async def test_rango_comun_en_ambos_lados(zonas, monkeypatch):
+    pedidos = []
+    monkeypatch.setattr(gee, "tiles_rgb", _fake_doble(pedidos))
+    r = await comparar.sentinel("panguipulli", CONFIG, 7, "2026-07-01", "2026-09-01", 80, combinacion="infrarrojo")
+    comun = {"min": [150, 400, 200], "max": [2600, 1500, 1300]}
+    assert r["estiramiento_comun"] == comun and r["combinacion"] == "infrarrojo" and r["remuestreo"] == "bicubico"
+    assert "infrarrojo" in r["fuente"]
+    for ref, escena in (("t0", "2026-07-05"), ("t1", "2026-08-28")):
+        assert r[ref]["estiramiento_comun"] is True
+        assert r[ref]["tile_url"] == f"https://ee/comun/infrarrojo/{escena}"
+        assert r[ref]["estiramiento"]["min"] == comun["min"]
+        assert r[ref]["fecha_escena"] == escena and r[ref]["candidatas"]  # el resto del lado no cambia
+    segunda = [p for p in pedidos if p["min"] is not None]
+    assert {(p["start"], p["end"]) for p in segunda} == {("2026-07-05", "2026-07-06"), ("2026-08-28", "2026-08-29")}
+    assert all(p["combinacion"] == "infrarrojo" for p in pedidos)
+    # cache: misma consulta sin GEE; otra combinacion se calcula aparte
+    n = len(pedidos)
+    await comparar.sentinel("panguipulli", CONFIG, 7, "2026-07-01", "2026-09-01", 80, combinacion="infrarrojo")
+    assert len(pedidos) == n
+    r2 = await comparar.sentinel("panguipulli", CONFIG, 7, "2026-07-01", "2026-09-01", 80)
+    assert len(pedidos) == n + 4 and r2["t0"]["tile_url"] == "https://ee/comun/color_real/2026-07-05"
+
+
+@pytest.mark.asyncio
+async def test_rango_comun_que_falla_en_un_lado_deja_ambos_con_su_rango(zonas, monkeypatch):
+    pedidos = []
+    monkeypatch.setattr(gee, "tiles_rgb", _fake_doble(pedidos, falla_comun="2026-08-28"))
+    r = await comparar.sentinel("panguipulli", CONFIG, 7, "2026-07-01", "2026-09-01", 80)
+    assert r["estiramiento_comun"] is None
+    assert r["t0"]["tile_url"] == "https://ee/2026-07-05/{z}/{x}/{y}" and r["t0"]["estiramiento_comun"] is False
+    assert r["t1"]["tile_url"] == "https://ee/2026-08-28/{z}/{x}/{y}" and r["t1"]["estiramiento_comun"] is False
+    assert r["t0"]["estiramiento"]["modo"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_un_lado_sin_imagen_no_hace_segunda_pasada(zonas, monkeypatch):
+    pedidos = []
+    base = _fake_doble(pedidos)
+
+    async def fake_rgb(start, end, geometry, cloud=40, fecha_objetivo=None, **kw):
+        if fecha_objetivo == "2026-09-01":
+            raise gee.GeeError("gee_sin_imagenes")
+        return await base(start, end, geometry, cloud, fecha_objetivo, **kw)
+
+    monkeypatch.setattr(gee, "tiles_rgb", fake_rgb)
+    r = await comparar.sentinel("panguipulli", CONFIG, 7, "2026-07-01", "2026-09-01", 80)
+    assert r["estado"] == "ok" and r["estiramiento_comun"] is None
+    assert r["t0"]["estiramiento_comun"] is False and r["t1"]["estado"] == "sin_datos"
+    assert not any(p["min"] is not None for p in pedidos)
+
+
+def test_rango_comun_requiere_contraste_local_en_ambos():
+    ok = {"estado": "ok", "fecha_escena": "2026-07-05", "estiramiento": {"modo": "local", "min": [1, 2, 3], "max": [9, 9, 9]}}
+    fijo = {**ok, "estiramiento": {"modo": "fijo", "motivo": "sin_rango_local", "min": [0, 0, 0], "max": [3000] * 3}}
+    viejo = {k: v for k, v in ok.items() if k != "estiramiento"}  # per_api_gee sin estiramiento
+    assert comparar.rango_comun(ok, ok) == {"min": [1, 2, 3], "max": [9, 9, 9]}
+    assert comparar.rango_comun(ok, fijo) is None
+    assert comparar.rango_comun(ok, viejo) is None
+
+
+@pytest.mark.asyncio
+async def test_cliente_tiles_rgb_pide_bicubico_y_contraste_local(monkeypatch):
+    enviados = []
+
+    class Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"tile_url": "u"}
+
+    class Cliente:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            enviados.append(json)
+            return Resp()
+
+    monkeypatch.setattr(gee.httpx, "AsyncClient", Cliente)
+    await gee.tiles_rgb("2026-07-01", "2026-07-02", CUADRADO, cloud=80, fecha_objetivo="2026-07-01")
+    await gee.tiles_rgb("2026-07-01", "2026-07-02", CUADRADO, combinacion="infrarrojo",
+                        estiramiento_min=[1, 2, 3], estiramiento_max=[4, 5, 6])
+    assert enviados[0]["remuestreo"] == "bicubico" and enviados[0]["estiramiento"] == "local"
+    assert enviados[0]["escena"] == "mas_limpia" and enviados[0]["mascara"] == "cs_plus"
+    assert enviados[0]["combinacion"] == "color_real" and "estiramiento_min" not in enviados[0]
+    assert enviados[1]["combinacion"] == "infrarrojo"
+    assert enviados[1]["estiramiento_min"] == [1, 2, 3] and enviados[1]["estiramiento_max"] == [4, 5, 6]

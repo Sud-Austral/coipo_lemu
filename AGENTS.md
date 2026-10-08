@@ -78,9 +78,9 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
   anti-bucle): abajo ANTES (t0), arriba DESPUES (t1) recortado con
   `clip-path: inset(0 0 0 Xpx)`; linea blanca con manija arrastrable (pointer
   events: mouse y tactil) y ←/→ 5 %. Contorno del poligono en ambos, fitBounds
-  padding 60, maxZoom 17. Fuente global (Alta resolucion | Sentinel-2 color real
-  | NDVI) y selector por lado (DESPUES ademas «Google (solo foto actual)», con
-  «fecha no informada»). Cada etiqueta muestra la fecha real y los dias respecto
+  padding 60, maxZoom 17. Fuente global (Alta resolucion (Wayback) | Sentinel-2
+  color real | Sentinel-2 infrarrojo | NDVI) y selector por lado (DESPUES ademas
+  «Google (solo foto actual)», con «fecha no informada»). Cada etiqueta muestra la fecha real y los dias respecto
   a t0/t1; sin imagen: «Sin imagen para esta fecha», nunca una imagen de relleno.
   - Wayback: se consulta la fecha de captura en el centroide (`identify` de
     `metadataLayerUrl`, cache por version y punto) de todas las versiones
@@ -105,10 +105,28 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
     selector sigue mostrando las candidatas automaticas). Los pixeles nublados
     residuales son transparentes sobre el fondo oscuro del comparador
     (`#1b2420`, nunca blanco) con la nota «zonas sin dato por nubes». Cache 30
-    min por (poligono, fecha, cloud) y por (poligono, escena elegida, cloud);
-    un fallo de GEE no se cachea ni agranda la ventana (si ya habia una escena
-    de una ventana menor, se muestra con `incompleto`). Nunca 500. NDVI:
-    reutiliza `/api/v1/sentinel/tiles` (sin mascara de nubes).
+    min por (poligono, combinacion, fecha, cloud), por (..., escena elegida,
+    cloud) y por (..., escena, rango comun); un fallo de GEE no se cachea ni
+    agranda la ventana (si ya habia una escena de una ventana menor, se
+    muestra con `incompleto`). Nunca 500. NDVI: reutiliza
+    `/api/v1/sentinel/tiles` (sin mascara de nubes).
+  - Presentacion Sentinel-2 (per_api_gee 2026.10.08.4): `combinacion`
+    `color_real` (B4/B3/B2) | `infrarrojo` (B8/B4/B3: rojo intenso = vegetacion
+    sana, celeste/cafe = suelo o corta, negro = agua; leyenda chica en el
+    comparador). Siempre `remuestreo:'bicubico'` (suaviza el borde del pixel de
+    10 m al acercar; NO agrega detalle: nada de super-resolucion ni nitidez) y
+    `estiramiento:'local'` (percentiles 2-98 por banda del poligono + 1,5 km,
+    gamma 1,1). Doble pasada en `comparar.sentinel`: cada lado trae su rango,
+    se toma el comun (min de los min, max de los max) y se pide de nuevo la
+    escena de cada lado (ventana de 1 dia) con `estiramiento_min/max`; asi un
+    lado no se ve mas claro por el ajuste. Si la segunda pasada falla en un
+    lado, ambos quedan con su propio rango (`estiramiento_comun:false`, nunca
+    mezclados). Respuesta: `combinacion`, `remuestreo`, `estiramiento_comun:
+    {min,max}|null` y por lado `estiramiento:{modo,min,max}`. Etiqueta:
+    «contraste ajustado a la zona, igual en ambos lados» (o «solo en este
+    lado» / «contraste fijo»). La escena elegida a mano vale para ambas
+    combinaciones. El paso automatico a Sentinel-2 (sin foto Wayback distinta)
+    usa color real.
 - Bases del mapa: Esri (defecto), Bing (protocolo `bing://` -> quadkey),
   Google (`lyrs=s`) y OSM. Bing y Google solo para comparacion en el piloto
   interno. Vista por URL: `?base=sat|bing|google|osm&ciren=0&predios=1#zoom/lat/lon`.
@@ -125,7 +143,7 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
 
 | Fuente | Uso | Endpoint |
 |---|---|---|
-| per_api_gee | NDVI medio por poligono t0/t1 con mascara Cloud Score+ y cobertura limpia, teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) y Sentinel-2 color real del comparador (escena mas limpia sobre el poligono, ±15/30/60 dias, cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi`, `/v1/tiles/rgb` |
+| per_api_gee | NDVI medio por poligono t0/t1 con mascara Cloud Score+ y cobertura limpia, teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) y Sentinel-2 color real / infrarrojo del comparador (escena mas limpia sobre el poligono, ±15/30/60 dias, bicubico, contraste local comun t0/t1, cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi`, `/v1/tiles/rgb` |
 | CIREN (publico) | Poligonos de bosque de la comuna (zonas de deteccion), capa raster, leyenda, popup por punto | `USOS_DE_LA_TIERRA__CONAF/MapServer` (capa 12 = Los Rios, CONAF 2024) |
 | CIREN / IDE Minagri (publico) | Predios rurales (deslindes SII) de la comuna con rol; capa raster y popup | `IDEMINAGRI/PROPIEDADES_RURALES/MapServer` (capa 11 = Los Rios, CIREN 2018) |
 | per_api_saff | Planes de manejo de los ultimos 10 anios, filtrados por `Comuna_Predio` (cache 6 h por comuna, tramos de 1 anio) | `/v1/historico/pm` |
@@ -221,3 +239,11 @@ o hay `Nro.Resolucion` y `Super.Aprobada` > 0, con `Fec.Resolucion` <= t1
   alcanzable).
 - Wayback: si t0, t1 y la ultima version comparten la misma captura en el
   punto, solo hay una fecha y no se puede comparar.
+- Presentacion Sentinel-2 (bicubico, contraste local, infrarrojo) es nueva en
+  per_api_gee 2026.10.08.4: desplegarla antes que Lemu 2026.10.08.9 (con una
+  per_api_gee anterior los campos nuevos se ignoran: se ve como antes y sin
+  «igual en ambos lados»). Validar en LAB: que el bosque se lea mejor con
+  percentiles 2-98 + gamma 1,1, el max de NIR (5000) del infrarrojo fijo de
+  respaldo y el tiempo extra (un `reduceRegion` de percentiles por pedido y la
+  segunda pasada: 2 pedidos mas por combinacion). Las teselas reales no se
+  pudieron ver en local (GEE no alcanzable).
