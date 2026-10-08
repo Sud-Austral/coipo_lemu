@@ -27,12 +27,11 @@ async def clasificar_punto(lat: float, lon: float) -> ClasificacionUso:
     if not capa or capa.get("layer_id") is None:
         return ClasificacionUso(None, None, False)
     try:
-        features = await ciren.query_uso_suelo(capa["layer_id"], lon, lat, radio_m=200)
+        props = await ciren.query_punto(capa["layer_id"], lon, lat)
     except ciren.CirenError:
         return ClasificacionUso(None, None, False)
-    if not features:
+    if not props:
         return ClasificacionUso(None, None, False)
-    props = features[0].get("properties") or {}
     uso = props.get("uso")
     subuso = props.get("subuso")
     return ClasificacionUso(uso, subuso, ciren.es_uso_forestal(uso, subuso))

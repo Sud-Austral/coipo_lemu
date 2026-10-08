@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from datetime import date, timedelta
 
-from app.logica import cambio_vegetacion, lista_negra, mascara_bosque
+from app.logica import cambio_vegetacion, ficha_punto, lista_negra, mascara_bosque
 
 CACHE_TTL_S = 15 * 60
 _cache: dict[tuple, tuple[float, dict]] = {}
@@ -16,23 +16,32 @@ _cache: dict[tuple, tuple[float, dict]] = {}
 # Puntos de muestreo piloto para la region de Panguipulli (Los Rios). En una
 # iteracion posterior esto se reemplaza por una grilla real o por los
 # centroides de rodales SIGCRA.
+# - comuna: filtro de Comuna_Predio en SAFF.
+# - ciren_layer: capa del MapServer CIREN USOS_DE_LA_TIERRA__CONAF (12 = Los Rios, CONAF 2024).
+# - bbox: [oeste, sur, este, norte] de la comuna, para teselas Sentinel-2.
 REGIONES_PILOTO = {
     "panguipulli": {
         "nombre": "Panguipulli",
+        "comuna": "PANGUIPULLI",
+        "ciren_layer": 12,
+        "ciren_anio": 2024,
+        "centro": (-39.64, -72.2),
+        "bbox": (-72.75, -39.95, -71.55, -39.30),
         "puntos": [
-            {"lat": -39.636, "lon": -72.333, "codigo_predio": None},
-            {"lat": -39.715, "lon": -72.145, "codigo_predio": None},
-            {"lat": -39.52, "lon": -72.02, "codigo_predio": None},
+            {"lat": -39.636, "lon": -72.333},
+            {"lat": -39.715, "lon": -72.145},
+            {"lat": -39.52, "lon": -72.02},
         ],
     }
 }
+RADIO_PLANES_KM = 3.0
 
 
 def _clave_cache(region: str, t0: str, t1: str) -> tuple:
     return (region, t0, t1)
 
 
-def _rango(fecha_iso: str, dias_ventana: int = 15) -> tuple[str, str]:
+def rango(fecha_iso: str, dias_ventana: int = 15) -> tuple[str, str]:
     """Convierte una fecha puntual en una ventana [fecha, fecha+dias] para
     darle a Sentinel-2 margen de encontrar una imagen sin nubes."""
     base = date.fromisoformat(fecha_iso)
@@ -59,8 +68,8 @@ async def ejecutar_deteccion(region: str, t0: str, t1: str, cloud: int = 40) -> 
             "regiones_disponibles": list(REGIONES_PILOTO),
         }
 
-    t0_inicio, t0_fin = _rango(t0)
-    t1_inicio, t1_fin = _rango(t1)
+    t0_inicio, t0_fin = rango(t0)
+    t1_inicio, t1_fin = rango(t1)
 
     resultados = []
     for punto in config["puntos"]:
@@ -72,14 +81,18 @@ async def ejecutar_deteccion(region: str, t0: str, t1: str, cloud: int = 40) -> 
             clasificacion = await mascara_bosque.clasificar_punto(punto["lat"], punto["lon"])
             item["uso_suelo"] = clasificacion.to_dict()
             if clasificacion.es_forestal:
-                evaluacion = await lista_negra.evaluar_predio(
-                    punto.get("codigo_predio"),
-                    date.fromisoformat(t0),
-                    date.fromisoformat(t1),
+                ficha = await ficha_punto.ficha_punto(
+                    config["comuna"], config["centro"], punto["lat"], punto["lon"],
+                    RADIO_PLANES_KM, date.fromisoformat(t1),
                 )
-                item["lista_negra"] = evaluacion.to_dict()
+                item["lista_negra"] = lista_negra.evaluar_ficha(ficha).to_dict()
             else:
                 item["lista_negra"] = {"estado": "descartado_no_forestal"}
+        elif cambio.delta is None:
+            # Sin NDVI en t0 o t1 (GEE no respondio o no hubo imagen): no se
+            # puede afirmar "sin cambio".
+            item["uso_suelo"] = None
+            item["lista_negra"] = {"estado": "sin_datos", "motivo": "Sin NDVI Sentinel-2 en t0 o t1"}
         else:
             item["uso_suelo"] = None
             item["lista_negra"] = {"estado": "sin_cambio"}
@@ -93,8 +106,27 @@ async def ejecutar_deteccion(region: str, t0: str, t1: str, cloud: int = 40) -> 
         "indice": "ndvi",
         "puntos_evaluados": len(resultados),
         "alertas": sum(1 for r in resultados if r.get("lista_negra", {}).get("estado") == "alerta"),
+        "revisar": sum(1 for r in resultados if r.get("lista_negra", {}).get("estado") == "revisar"),
         "resultados": resultados,
         "desde_cache": False,
     }
-    _cache[clave] = (ahora, resultado)
+    # No se cachea si alguna fuente fallo, para reintentar en la proxima carga.
+    if not any(r.get("lista_negra", {}).get("estado") == "sin_datos" for r in resultados):
+        _cache[clave] = (ahora, resultado)
     return resultado
+
+
+def info_regiones() -> list[dict]:
+    return [
+        {
+            "id": clave,
+            "nombre": cfg["nombre"],
+            "puntos": len(cfg["puntos"]),
+            "comuna": cfg["comuna"],
+            "ciren_layer": cfg["ciren_layer"],
+            "ciren_anio": cfg["ciren_anio"],
+            "centro": {"lat": cfg["centro"][0], "lon": cfg["centro"][1]},
+            "bbox": list(cfg["bbox"]),
+        }
+        for clave, cfg in REGIONES_PILOTO.items()
+    ]

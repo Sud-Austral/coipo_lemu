@@ -90,6 +90,34 @@ async def query_uso_suelo(layer_id: int, lon: float, lat: float, radio_m: float 
     return data.get("features") or []
 
 
+async def query_punto(layer_id: int, lon: float, lat: float) -> dict | None:
+    """Atributos del poligono de uso de suelo que contiene el punto (o None)."""
+    params = {
+        "geometry": f"{lon},{lat}",
+        "geometryType": "esriGeometryPoint",
+        "inSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "uso,subuso,uso_tierra,superf_ha,nom_com",
+        "returnGeometry": "false",
+        "f": "json",
+    }
+    url = f"{CIREN_BASE_URL}/{layer_id}/query"
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+            resp = await client.get(url, params=params)
+    except httpx.HTTPError as exc:
+        raise CirenError(f"ciren_unreachable: {type(exc).__name__}") from exc
+    if resp.status_code >= 400:
+        raise CirenError(f"ciren_error_{resp.status_code}")
+    data = resp.json()
+    if data.get("error"):
+        raise CirenError("ciren_query_error")
+    features = data.get("features") or []
+    if not features:
+        return None
+    return features[0].get("attributes") or {}
+
+
 def _sin_tildes(texto: str) -> str:
     reemplazos = {"á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ñ": "n"}
     for origen, destino in reemplazos.items():

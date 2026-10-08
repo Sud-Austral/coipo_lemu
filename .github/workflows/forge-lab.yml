@@ -122,6 +122,23 @@ jobs:
           print('Lemu 2.0 smoke:', 'puntos=', d.get('puntos_evaluados'), 'alertas=', d.get('alertas'))
           PY
 
+      - name: Smoke test ficha del punto (SAFF + SIGCRA)
+        if: steps.secrets.outputs.pending != 'true'
+        run: |
+          # Falla solo en HTTP 5xx; 0 planes es un resultado valido. Imprime solo conteos.
+          CODE="$(curl --silent --show-error --max-time 600 -o /tmp/lemu-ficha.json -w '%{http_code}' \
+            "http://127.0.0.1:${LEMU_PORT}/api/v1/punto/ficha?region=panguipulli&lat=-39.715&lon=-72.145")"
+          echo "ficha HTTP $CODE"
+          if [ "$CODE" -ge 500 ]; then echo "::error::/api/v1/punto/ficha devolvio HTTP $CODE"; exit 1; fi
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/lemu-ficha.json'))
+          saff = d.get('saff') or {}
+          print('Lemu 2.0 ficha:', 'saff=', saff.get('estado'), 'planes_comuna=', saff.get('planes_comuna'),
+                'planes_cercanos=', len(d.get('planes') or []), 'rodales=', len((d.get('rodales') or {}).get('features') or []),
+                'sigcra=', (d.get('sigcra') or {}).get('estado'))
+          PY
+
       - name: Refresh managed Nginx routes
         if: steps.secrets.outputs.pending != 'true'
         run: sudo /usr/local/sbin/forge-nginx-route

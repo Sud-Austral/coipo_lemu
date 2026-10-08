@@ -75,6 +75,29 @@ async def analysis_heatmap(
     return resp.json()
 
 
+async def tiles_ndvi(start: str, end: str, west: float, south: float, east: float, north: float) -> dict:
+    """Plantilla de teselas NDVI (mediana Sentinel-2 de la ventana) para MapLibre.
+
+    Usa GET /v1/tiles/ndvi de per_api_gee; devuelve {tile_url, images, ...}.
+    """
+    url = f"{GEE_BASE_URL}/v1/tiles/ndvi"
+    params = {"start": start, "end": end, "west": west, "south": south, "east": east, "north": north}
+    headers = {"X-API-Key": GEE_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+            resp = await client.get(url, params=params, headers=headers)
+    except httpx.HTTPError as exc:
+        raise GeeError(f"gee_unreachable: {type(exc).__name__}") from exc
+    if resp.status_code == 401:
+        raise GeeError("gee_unauthorized")
+    if resp.status_code >= 400:
+        raise GeeError(f"gee_error_{resp.status_code}")
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise GeeError("gee_respuesta_invalida") from exc
+
+
 async def ping() -> bool:
     """True si per_api_gee responde /health."""
     url = f"{GEE_BASE_URL}/health"

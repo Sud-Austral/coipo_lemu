@@ -68,38 +68,90 @@ def test_es_uso_forestal():
     assert ciren.es_uso_forestal(None, None) is False
 
 
-@pytest.mark.asyncio
-async def test_evaluar_predio_sin_codigo_predio():
-    resultado = await lista_negra.evaluar_predio(None, __import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 12, 31))
-    assert resultado.estado == lista_negra.ESTADO_SIN_DATOS
+def _ficha(**extra):
+    base = {"radio_km": 3.0, "saff": {"estado": "ok"}, "sigcra": {"estado": "ok"}, "planes": [], "dentro_de_rodal": None}
+    return {**base, **extra}
 
 
-@pytest.mark.asyncio
-async def test_evaluar_predio_encuentra_plan_vigente(monkeypatch):
-    async def fake_historico(fecha_desde, fecha_hasta, limit=2000):
-        return {"items": [{"Cod. Predio": "12345", "Nro.Solicitud": "478/32-74/21"}]}
+def test_estado_sin_planes_es_alerta():
+    assert lista_negra.evaluar_ficha(_ficha()).estado == lista_negra.ESTADO_ALERTA
 
-    from app.clientes import saff
 
-    monkeypatch.setattr(saff, "historico_pm", fake_historico)
+def test_estado_saff_caido_es_sin_datos():
+    ficha = _ficha(saff={"estado": "sin_datos", "error": "saff_unreachable"})
+    assert lista_negra.evaluar_ficha(ficha).estado == lista_negra.ESTADO_SIN_DATOS
 
-    import datetime
 
-    resultado = await lista_negra.evaluar_predio("12345", datetime.date(2026, 1, 1), datetime.date(2026, 12, 31))
+def test_estado_dentro_de_rodal_aprobado_es_en_regla():
+    ficha = _ficha(
+        planes=[{"Nro.Solicitud": "494/32-74/18"}],
+        dentro_de_rodal={"nro_solicitud": "494/32-74/18", "rodal": "4", "aprobado": True, "aprobado_a_t1": True},
+    )
+    resultado = lista_negra.evaluar_ficha(ficha)
     assert resultado.estado == lista_negra.ESTADO_EN_REGLA
-    assert resultado.plan_manejo is not None
+    assert resultado.plan_manejo == {"nro_solicitud": "494/32-74/18", "rodal": "4"}
+
+
+def test_estado_sigcra_caido_con_planes_es_sin_datos():
+    ficha = _ficha(planes=[{"Nro.Solicitud": "1"}], sigcra={"estado": "sin_datos"})
+    assert lista_negra.evaluar_ficha(ficha).estado == lista_negra.ESTADO_SIN_DATOS
+
+
+def test_estado_plan_cercano_fuera_de_rodal_es_revisar():
+    ficha = _ficha(planes=[{"Nro.Solicitud": "1"}])
+    assert lista_negra.evaluar_ficha(ficha).estado == lista_negra.ESTADO_REVISAR
+
+
+def test_plan_aprobado_respeta_fecha_t1():
+    import datetime
+
+    from app.logica.ficha_punto import plan_aprobado
+
+    plan = {"Estdo Solicitud": "APROBADA", "Fec.Resolucion": "2026-05-10T00:00:00"}
+    assert plan_aprobado(plan, datetime.date(2026, 9, 1)) is True
+    assert plan_aprobado(plan, datetime.date(2026, 1, 1)) is False
+    sin_estado = {"Estdo Solicitud": "EN TRAMITE", "Nro.Resolucion": "12", "Super.Aprobada": 5.2, "Fec.Resolucion": "2020-01-01"}
+    assert plan_aprobado(sin_estado, datetime.date(2026, 1, 1)) is True
+    assert plan_aprobado({"Estdo Solicitud": "RECHAZADA", "Super.Aprobada": 0}, None) is False
 
 
 @pytest.mark.asyncio
-async def test_evaluar_predio_sin_plan_es_alerta(monkeypatch):
-    async def fake_historico(fecha_desde, fecha_hasta, limit=2000):
-        return {"items": []}
+async def test_orquestador_sin_ndvi_es_sin_datos_y_no_cachea(monkeypatch):
+    from app.clientes import gee
+    from app.logica import orquestador
 
-    from app.clientes import saff
+    async def fake_query(lat, lon, start, end, cloud=40):
+        raise gee.GeeError("gee_unreachable")
 
-    monkeypatch.setattr(saff, "historico_pm", fake_historico)
+    monkeypatch.setattr(gee, "query_point_index", fake_query)
+    orquestador._cache.clear()
+    resultado = await orquestador.ejecutar_deteccion("panguipulli", "2026-07-01", "2026-09-01")
+    assert {r["lista_negra"]["estado"] for r in resultado["resultados"]} == {"sin_datos"}
+    assert orquestador._cache == {}
 
-    import datetime
 
-    resultado = await lista_negra.evaluar_predio("99999", datetime.date(2026, 1, 1), datetime.date(2026, 12, 31))
-    assert resultado.estado == lista_negra.ESTADO_ALERTA
+@pytest.mark.asyncio
+async def test_orquestador_cambio_forestal_usa_ficha(monkeypatch):
+    from app.clientes import gee
+    from app.logica import ficha_punto, orquestador
+
+    valores = iter([0.8, 0.3] * 3)
+
+    async def fake_query(lat, lon, start, end, cloud=40):
+        return {"ndvi": next(valores)}
+
+    async def fake_clasificar(lat, lon):
+        return mascara_bosque.ClasificacionUso("Bosques", "Bosque Nativo", True)
+
+    async def fake_ficha(comuna, centro, lat, lon, radio_km, t1):
+        assert comuna == "PANGUIPULLI" and radio_km == 3.0
+        return {"radio_km": radio_km, "saff": {"estado": "ok"}, "sigcra": {"estado": "no_consultado"},
+                "planes": [], "dentro_de_rodal": None}
+
+    monkeypatch.setattr(gee, "query_point_index", fake_query)
+    monkeypatch.setattr(mascara_bosque, "clasificar_punto", fake_clasificar)
+    monkeypatch.setattr(ficha_punto, "ficha_punto", fake_ficha)
+    orquestador._cache.clear()
+    resultado = await orquestador.ejecutar_deteccion("panguipulli", "2026-07-01", "2026-09-01")
+    assert resultado["alertas"] == 3
+    orquestador._cache.clear()
