@@ -150,6 +150,30 @@ async def cargar_planes_comuna(comuna: str, hoy: date | None = None) -> dict:
         return carga
 
 
+def saff_en_cache(comuna: str) -> bool:
+    guardado = _cache_saff.get(normalizar(comuna))
+    return bool(guardado and time.time() - guardado[0] < SAFF_CACHE_TTL_S)
+
+
+_tareas: dict[str, asyncio.Task] = {}
+
+
+def precargar_saff(comuna: str) -> None:
+    """Lanza la carga SAFF de la comuna en segundo plano (una a la vez)."""
+    clave = normalizar(comuna)
+    tarea = _tareas.get(clave)
+    if tarea and not tarea.done():
+        return
+
+    async def _correr():
+        try:
+            await cargar_planes_comuna(comuna)
+        except Exception:  # noqa: BLE001 - se reintenta en la proxima consulta
+            pass
+
+    _tareas[clave] = asyncio.create_task(_correr())
+
+
 def plan_aprobado(plan: dict, t1: date | None) -> bool:
     """Resolucion aprobada con Fec.Resolucion <= t1 (si se entrega t1)."""
     estado = normalizar(plan.get("Estdo Solicitud"))
@@ -199,8 +223,13 @@ async def ficha_punto(
     lon: float,
     radio_km: float = 3.0,
     t1: date | None = None,
+    esperar_saff: bool = True,
 ) -> dict:
-    """Planes SAFF cercanos, rodales SIGCRA y cruce punto-en-rodal."""
+    """Planes SAFF cercanos, rodales SIGCRA y cruce punto-en-rodal.
+
+    Con esperar_saff=False no bloquea si la carga SAFF de la comuna aun no
+    esta en cache: la lanza en segundo plano y responde sin_datos (cargando).
+    """
     respuesta: dict = {
         "lat": lat,
         "lon": lon,
@@ -212,6 +241,11 @@ async def ficha_punto(
         "rodales": {"type": "FeatureCollection", "features": []},
         "dentro_de_rodal": None,
     }
+    if not esperar_saff and not saff_en_cache(comuna):
+        precargar_saff(comuna)
+        respuesta["saff"] = {"estado": "sin_datos", "error": "saff_cargando"}
+        respuesta["conclusion"] = "Sin datos por el momento: SAFF se está cargando, vuelve a intentar en unos minutos."
+        return respuesta
     try:
         carga = await cargar_planes_comuna(comuna)
     except saff.SaffError as exc:

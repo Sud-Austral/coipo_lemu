@@ -126,7 +126,7 @@ jobs:
         if: steps.secrets.outputs.pending != 'true'
         run: |
           # Falla solo en HTTP 5xx; 0 planes es un resultado valido. Imprime solo conteos.
-          CODE="$(curl --silent --show-error --max-time 600 -o /tmp/lemu-ficha.json -w '%{http_code}' \
+          CODE="$(curl --silent --show-error --max-time 60 -o /tmp/lemu-ficha.json -w '%{http_code}' \
             "http://127.0.0.1:${LEMU_PORT}/api/v1/punto/ficha?region=panguipulli&lat=-39.715&lon=-72.145")"
           echo "ficha HTTP $CODE"
           if [ "$CODE" -ge 500 ]; then echo "::error::/api/v1/punto/ficha devolvio HTTP $CODE"; exit 1; fi

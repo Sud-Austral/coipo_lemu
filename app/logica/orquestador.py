@@ -83,7 +83,7 @@ async def ejecutar_deteccion(region: str, t0: str, t1: str, cloud: int = 40) -> 
             if clasificacion.es_forestal:
                 ficha = await ficha_punto.ficha_punto(
                     config["comuna"], config["centro"], punto["lat"], punto["lon"],
-                    RADIO_PLANES_KM, date.fromisoformat(t1),
+                    RADIO_PLANES_KM, date.fromisoformat(t1), esperar_saff=False,
                 )
                 item["lista_negra"] = lista_negra.evaluar_ficha(ficha).to_dict()
             else:

@@ -143,7 +143,7 @@ async def test_orquestador_cambio_forestal_usa_ficha(monkeypatch):
     async def fake_clasificar(lat, lon):
         return mascara_bosque.ClasificacionUso("Bosques", "Bosque Nativo", True)
 
-    async def fake_ficha(comuna, centro, lat, lon, radio_km, t1):
+    async def fake_ficha(comuna, centro, lat, lon, radio_km, t1, esperar_saff=True):
         assert comuna == "PANGUIPULLI" and radio_km == 3.0
         return {"radio_km": radio_km, "saff": {"estado": "ok"}, "sigcra": {"estado": "no_consultado"},
                 "planes": [], "dentro_de_rodal": None}

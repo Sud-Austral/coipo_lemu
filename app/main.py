@@ -19,6 +19,14 @@ from app.logica.orquestador import REGIONES_PILOTO, ejecutar_deteccion, info_reg
 app = FastAPI(title="Lemu 2.0", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 
+@app.on_event("startup")
+async def _precargar_saff():
+    # La carga SAFF de 10 anios tarda minutos: se hace en segundo plano al
+    # arrancar para que deteccion y ficha no queden esperando.
+    for cfg in REGIONES_PILOTO.values():
+        ficha_punto.precargar_saff(cfg["comuna"])
+
+
 def _region(region: str) -> dict:
     config = REGIONES_PILOTO.get(region)
     if not config:
@@ -92,7 +100,7 @@ async def punto_ficha(
     t1: date | None = Query(None, description="Si se entrega, evalua aprobacion a esa fecha"),
 ):
     config = _region(region)
-    ficha = await ficha_punto.ficha_punto(config["comuna"], config["centro"], lat, lon, radio_km, t1)
+    ficha = await ficha_punto.ficha_punto(config["comuna"], config["centro"], lat, lon, radio_km, t1, esperar_saff=False)
     return {"region": region, **ficha}
 
 
