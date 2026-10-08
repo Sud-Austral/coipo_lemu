@@ -1380,6 +1380,14 @@ function pintarComparador() {
   const misma = a.fuente === 'wayback' && b.fuente === 'wayback' && cmp.capturas?.length && a.captura === b.captura;
   const ninguna = usaWayback && cmp.capturas && !cmp.capturas.length;
   const aviso = $('cmp-aviso');
+  const auto = cmp.autoSentinel && (a.fuente === 'sentinel' || b.fuente === 'sentinel');
+  if (auto) {
+    aviso.hidden = false;
+    aviso.innerHTML = `<span>${esc(cmp.autoSentinel)}</span>
+    <button type="button" class="btn-primario" id="cmp-volver-wayback">Ver foto de archivo igual</button>`;
+    $('cmp-volver-wayback').addEventListener('click', () => { cmp.autoSentinel = null; usarFuente('wayback'); });
+    return;
+  }
   aviso.hidden = !(misma || ninguna);
   if (aviso.hidden) return;
   aviso.innerHTML = `<span>${misma ? 'No hay foto de alta resolución distinta entre t0 y t1; usa Sentinel-2.' : 'No hay foto de alta resolución con fecha en este punto; usa Sentinel-2.'}</span>
@@ -1457,6 +1465,18 @@ async function cargarWaybackCmp(pedido) {
   const elegidas = elegirCapturas(caps, c.t0, c.t1);
   cmp.lados.a.captura = elegidas.a;
   cmp.lados.b.captura = elegidas.b;
+  // Sin foto de alta resolución distinta entre t0 y t1: pasa solo a Sentinel-2
+  // (solo si el usuario no cambió la fuente mientras se buscaba).
+  const sinFotos = !caps.length;
+  const misma = caps.length && elegidas.a === elegidas.b;
+  const intactos = cmp.lados.a.fuente === 'wayback' && cmp.lados.b.fuente === 'wayback';
+  if ((sinFotos || misma) && intactos) {
+    cmp.autoSentinel = sinFotos
+      ? 'No hay foto de alta resolución en este punto: se muestra Sentinel-2.'
+      : 'No hay foto de alta resolución distinta entre t0 y t1: se muestra Sentinel-2.';
+    usarFuente('sentinel');
+    return;
+  }
   pintarComparador();
 }
 
@@ -1475,6 +1495,7 @@ async function abrirComparador(i) {
     sentinelCargando: new Set(),
     ndvi: undefined,
     pidiendo: new Set(),
+    autoSentinel: null,
     pct: 50,
   });
   if ($('comparador').hidden) cmp.volverFoco = document.activeElement;
