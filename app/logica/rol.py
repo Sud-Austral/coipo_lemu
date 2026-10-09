@@ -3,7 +3,7 @@
 CIREN (Propiedades Rurales) trae el rol como «manzana-predio» ('209-58') y
 el codigo de comuna SUBDERE aparte (comudere). En SAFF «Rol Avaluo» es texto
 libre (COALESCE de VISTA_PREDIO.PREDIO_ROL, VISTA_TRAMITACION.ROL_AVALUO y
-ROL.ROL_NUMERO en per_api_saff), asi que se aceptan variantes:
+ROL.ROL_NUMERO en API SAFF), asi que se aceptan variantes:
 '209-58', '00209-00058', '209/58', ' 209 - 058 ', '14108-209-58' (con codigo
 de comuna) y varios roles en un mismo campo ('209-58; 209-59').
 Rotulos sin numero ('SR', 'RIO FUY', 'RUTA 203') no son roles.

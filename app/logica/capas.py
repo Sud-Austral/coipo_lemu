@@ -1,4 +1,4 @@
-"""Capas de mapa: teselas NDVI Sentinel-2 (per_api_gee) y consulta CIREN por punto."""
+"""Capas de mapa: teselas NDVI Sentinel-2 (API GEE) y consulta CIREN por punto."""
 from __future__ import annotations
 
 import asyncio

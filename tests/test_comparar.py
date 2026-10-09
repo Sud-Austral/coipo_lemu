@@ -1,4 +1,4 @@
-"""Comparador antes/despues: ventana creciente de Sentinel-2 color real y cache (per_api_gee mockeado)."""
+"""Comparador antes/despues: ventana creciente de Sentinel-2 color real y cache (API GEE mockeado)."""
 from __future__ import annotations
 
 from datetime import date
@@ -261,7 +261,7 @@ async def test_un_lado_sin_imagen_no_hace_segunda_pasada(zonas, monkeypatch):
 def test_rango_comun_requiere_contraste_local_en_ambos():
     ok = {"estado": "ok", "fecha_escena": "2026-07-05", "estiramiento": {"modo": "local", "min": [1, 2, 3], "max": [9, 9, 9]}}
     fijo = {**ok, "estiramiento": {"modo": "fijo", "motivo": "sin_rango_local", "min": [0, 0, 0], "max": [3000] * 3}}
-    viejo = {k: v for k, v in ok.items() if k != "estiramiento"}  # per_api_gee sin estiramiento
+    viejo = {k: v for k, v in ok.items() if k != "estiramiento"}  # API GEE sin estiramiento
     assert comparar.rango_comun(ok, ok) == {"min": [1, 2, 3], "max": [9, 9, 9]}
     assert comparar.rango_comun(ok, fijo) is None
     assert comparar.rango_comun(ok, viejo) is None

@@ -1,7 +1,7 @@
 """Orquesta la deteccion por poligonos: bosque CIREN -> NDVI zonal (GEE) -> predio CIREN -> estado SAFF.
 
 1. Poligonos de bosque CIREN de la comuna (zonas_ciren, cache 7 dias).
-2. NDVI medio t0/t1 por poligono en per_api_gee /v1/zonal/ndvi-change, en
+2. NDVI medio t0/t1 por poligono en API GEE /v1/zonal/ndvi-change, en
    lotes de <= 1000 con concurrencia 3, con mascara de nubes por pixel
    Cloud Score+ (`mascara='cs_plus'`). Si menos de la mitad del poligono
    queda sin nubes en t0 o t1, GEE devuelve `motivo='nubes'`: el poligono no
@@ -208,7 +208,7 @@ def _respuesta(t: Trabajo, config: dict) -> dict:
     zonas, valores, errores = n["zonas"], n["valores"], n["errores"]
     if errores and len(errores) == n["lotes"]:
         sin_img = all(e == "gee_sin_imagenes" for e in errores)
-        mensaje = "Sin imagen Sentinel-2 en la ventana de t0 o t1." if sin_img else f"{SIN_DATOS}: per_api_gee no respondió."
+        mensaje = "Sin imagen Sentinel-2 en la ventana de t0 o t1." if sin_img else f"{SIN_DATOS}: la API GEE no respondió."
         gee_estado = {"estado": "sin_datos", "lotes": n["lotes"], "lotes_fallidos": len(errores), "error": errores[0]}
     else:
         mensaje = None

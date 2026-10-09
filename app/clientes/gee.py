@@ -1,11 +1,11 @@
-"""Cliente HTTP para per_api_gee (NDVI/NDBI sobre Sentinel-2)."""
+"""Cliente HTTP para API GEE (NDVI/NDBI sobre Sentinel-2)."""
 from __future__ import annotations
 
 import os
 
 import httpx
 
-GEE_BASE_URL = os.getenv("GEE_BASE_URL", "http://forge-lab-api-gee-api:8080")
+GEE_BASE_URL = os.getenv("GEE_BASE_URL", "")
 GEE_API_KEY = os.getenv("GEE_API_KEY", "")
 TIMEOUT_S = 60.0
 
@@ -97,7 +97,7 @@ async def analysis_heatmap(
 async def tiles_ndvi(start: str, end: str, west: float, south: float, east: float, north: float) -> dict:
     """Plantilla de teselas NDVI (mediana Sentinel-2 de la ventana) para MapLibre.
 
-    Usa GET /v1/tiles/ndvi de per_api_gee; devuelve {tile_url, images, ...}.
+    Usa GET /v1/tiles/ndvi de API GEE; devuelve {tile_url, images, ...}.
     """
     url = f"{GEE_BASE_URL}/v1/tiles/ndvi"
     params = {"start": start, "end": end, "west": west, "south": south, "east": east, "north": north}
@@ -160,7 +160,7 @@ async def tiles_rgb(
 
 
 async def ping() -> bool:
-    """True si per_api_gee responde /health."""
+    """True si API GEE responde /health."""
     url = f"{GEE_BASE_URL}/health"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

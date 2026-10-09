@@ -3,11 +3,11 @@
 Nota de diseno: el audio original hablaba de "NDBI", pero NDBI (Normalized
 Difference Built-up Index) mide urbanizacion/construccion, no perdida de
 vegetacion. Para detectar corta/cambio de cobertura boscosa el indice
-correcto es NDVI (o NBR para zonas quemadas); per_api_gee ya expone ambos.
+correcto es NDVI (o NBR para zonas quemadas); API GEE ya expone ambos.
 Usamos NDVI por defecto; queda documentado para que Alfredo lo confirme.
 
 El NDVI de cada poligono CIREN es el promedio de la mediana Sentinel-2 de
-cada ventana (per_api_gee /v1/zonal/ndvi-change).
+cada ventana (API GEE /v1/zonal/ndvi-change).
 """
 from __future__ import annotations
 

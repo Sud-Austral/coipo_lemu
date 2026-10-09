@@ -1,4 +1,4 @@
-"""Cliente HTTP para per_api_saff (historico de solicitudes de plan de manejo).
+"""Cliente HTTP para API SAFF (historico de solicitudes de plan de manejo).
 
 Los items de /v1/historico/pm traen datos personales del propietario. Se
 eliminan aqui, apenas llegan, con una lista blanca de campos: nada con
@@ -12,12 +12,12 @@ from datetime import date
 
 import httpx
 
-SAFF_BASE_URL = os.getenv("SAFF_BASE_URL", "http://forge-lab-api-saff-api:8080")
+SAFF_BASE_URL = os.getenv("SAFF_BASE_URL", "")
 SAFF_API_KEY = os.getenv("SAFF_API_KEY", "")
 TIMEOUT_S = 90.0
 MAX_RANGO_DIAS = 3660
 
-# Unicos campos de SAFF que se exponen (ver FIELDS en per_api_saff
+# Unicos campos de SAFF que se exponen (ver FIELDS en API SAFF
 # app/historico_pm_routes.py). "Nombre Predio" es el nombre del predio, no de
 # una persona.
 CAMPOS_PUBLICOS = (
@@ -46,7 +46,7 @@ _PATRON_PII = re.compile(r"rut|correo|mail|propietario|sexo|etnia|cant_prop|tipo
 
 
 class SaffError(RuntimeError):
-    """Error al consultar per_api_saff."""
+    """Error al consultar API SAFF."""
 
 
 def sin_datos_personales(item: dict) -> dict:

@@ -1,6 +1,6 @@
-"""Cliente HTTP para per_api_sigcra (rodales con geometria por solicitud SAFF).
+"""Cliente HTTP para API SIGCRA (rodales con geometria por solicitud SAFF).
 
-Ruta real en per_api_sigcra: GET /v1/bosque-co2/rodales?solicitud=<Nro.Solicitud>
+Ruta real en API SIGCRA: GET /v1/bosque-co2/rodales?solicitud=<Nro.Solicitud>
 (app/bosque_routes.py). Devuelve un FeatureCollection en EPSG:4326 buscando la
 solicitud en todas las vistas con geometria; solo expone columnas de una lista
 fija (sin propietarios ni RUT).
@@ -11,7 +11,7 @@ import os
 
 import httpx
 
-SIGCRA_BASE_URL = os.getenv("SIGCRA_BASE_URL", "http://forge-lab-api-sigcra-api:8080")
+SIGCRA_BASE_URL = os.getenv("SIGCRA_BASE_URL", "")
 SIGCRA_API_KEY = os.getenv("SIGCRA_API_KEY", "")
 TIMEOUT_S = 30.0
 RODALES_PATH = "/v1/bosque-co2/rodales"
@@ -30,7 +30,7 @@ PROPIEDADES_RODAL = (
 
 
 class SigcraError(RuntimeError):
-    """Error al consultar per_api_sigcra."""
+    """Error al consultar API SIGCRA."""
 
 
 async def rodales_por_solicitud(nro_solicitud: str, limit: int = 200) -> dict:

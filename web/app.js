@@ -631,7 +631,7 @@ function textoResumen(d) {
   if (s.sin_imagen_limpia) partes.push(`${s.sin_imagen_limpia.toLocaleString('es-CL')} polígonos sin imagen limpia (nubes sobre más de la mitad del polígono en t0 o t1): no se evalúan.`);
   if (s.sin_ndvi) partes.push(`${s.sin_ndvi.toLocaleString('es-CL')} sin NDVI (sin imagen o sin respuesta de GEE).`);
   if (d.mascara_nubes === 'cs_plus') partes.push('Nubes y sombras quitadas píxel a píxel (Cloud Score+).');
-  if (d.gee?.estado === 'parcial') partes.push(`per_api_gee no respondió en ${d.gee.lotes_fallidos} de ${d.gee.lotes} lotes.`);
+  if (d.gee?.estado === 'parcial') partes.push(`La API GEE no respondió en ${d.gee.lotes_fallidos} de ${d.gee.lotes} lotes.`);
   if (d.saff?.estado !== 'ok') partes.push(`SAFF: ${SIN_DATOS} (se está cargando); los cambios quedan «sin datos».`);
   if (d.predios?.estado !== 'ok') partes.push(`Predios CIREN: ${SIN_DATOS} (se están cargando); sin rol los cambios quedan «sin datos».`);
   return partes.join(' ');
@@ -1302,7 +1302,7 @@ function infoLado(l) {
     else if (s.estiramiento?.modo === 'local') detalle.push('contraste ajustado a la zona solo en este lado');
     else if (s.estiramiento) detalle.push('contraste fijo');
     if (s.nubes_pct > 0) detalle.push('zonas sin dato por nubes (fondo oscuro)');
-    if (s.incompleto) detalle.push('per_api_gee no respondió al ampliar la ventana');
+    if (s.incompleto) detalle.push('La API GEE no respondió al ampliar la ventana');
     return {
       estado: 'ok', tiles: [s.tile_url], maxzoom: 20, atribucion: 'Copernicus Sentinel-2 vía Google Earth Engine · Cloud Score+', ir,
       linea: partes.join(' · '), detalle: detalle.join(' · '),

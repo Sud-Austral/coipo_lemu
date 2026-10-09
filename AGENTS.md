@@ -1,9 +1,9 @@
-# per_lemu2.0
+# coipo_lemu
 
 Deteccion de cambios de cobertura forestal (corta no autorizada) cruzando
-NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
-(rol SII), planes de manejo SAFF (per_api_saff) y rodales SIGCRA
-(per_api_sigcra).
+NDVI Sentinel-2 (API GEE), uso de suelo CIREN, predios rurales CIREN
+(rol SII), planes de manejo SAFF (API SAFF) y rodales SIGCRA
+(API SIGCRA).
 
 - `app/`: backend FastAPI. `clientes/` = un cliente HTTP por fuente externa;
   `logica/` = orquestacion y reglas de cruce (sin tocar directamente las APIs
@@ -12,14 +12,17 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
 - `web/`: front estatico (`index.html` + `app.css` + `app.js`, MapLibre
   vendorizado). Banner UIA en `web/banner-conaf-uia.jpg` (copia de
   `coipo_master_produccion/identidad/banner3.jpg`). Rutas relativas: la app
-  vive bajo `/lab/lemu2-0/`.
-- Push a `main` despliega en Forge LAB: `/lab/lemu2-0/`.
+  funciona en la raiz o bajo cualquier subruta.
+- Ramas: `uat` = ambiente UAT (vm3); `main` = produccion (solo via PR aprobado).
+- Configuracion por variables de entorno (ver `.env.example`): URL y llave
+  de las APIs GEE, SAFF y SIGCRA. Sin URL configurada esa fuente responde
+  «Sin datos por el momento».
 - Region piloto: Panguipulli (`REGIONES` en `orquestador.py`: comuna CIREN/SAFF,
   `comudere` SUBDERE, capa CIREN de uso, capa predial y bbox). Ya no hay puntos fijos: se evaluan todos los poligonos
   de bosque CIREN de la comuna.
 - Deteccion (`/api/v1/deteccion`): poligonos CIREN `uso='Bosques'` de la
   comuna con `superf_ha >= min_ha` (def. 1 ha) -> NDVI medio t0/t1 por
-  poligono en per_api_gee `/v1/zonal/ndvi-change`, lotes de <= 1000,
+  poligono en API GEE `/v1/zonal/ndvi-change`, lotes de <= 1000,
   concurrencia 3, timeout 180 s. Corre en segundo plano: el endpoint responde
   202 `{estado:'calculando', avance:'3/6 lotes'}` y el front repite cada 5 s.
   NDVI cacheado 6 h por (region, t0, t1, cloud, min_ha); 2 min si fallo GEE.
@@ -64,7 +67,7 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
   rotulos como «PARQUE NACIONAL VILLARRICA» o «VP-II»).
 - Rol (`logica/rol.py`): CIREN trae `rol` como «manzana-predio» y la comuna
   aparte; en SAFF `Rol Avaluo` es texto libre (`COALESCE(VISTA_PREDIO.PREDIO_ROL,
-  VISTA_TRAMITACION.ROL_AVALUO, ROL.ROL_NUMERO)` en per_api_saff). Se
+  VISTA_TRAMITACION.ROL_AVALUO, ROL.ROL_NUMERO)` en API SAFF). Se
   normaliza: sin espacios, guion o barra como separador, sin ceros a la
   izquierda (`00209-00058` -> `209-58`); un prefijo de 5 digitos se toma como
   codigo de comuna y debe coincidir con `comudere`; varios roles por campo se
@@ -90,7 +93,7 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
     posteriores a ANTES (de preferencia >= t0). Si es la misma foto: «No hay foto
     de alta resolucion distinta entre t0 y t1; usa Sentinel-2» con boton.
   - Sentinel-2 color real: `/api/v1/comparar/sentinel?region&id&t0&t1&cloud
-    [&escena_t0&escena_t1]` (`logica/comparar.py`) -> per_api_gee `POST
+    [&escena_t0&escena_t1]` (`logica/comparar.py`) -> API GEE `POST
     /v1/tiles/rgb` con la geometria del poligono CIREN, `escena:'mas_limpia'`,
     `mascara:'cs_plus'`, `recortar:false` y `fecha_objetivo` = t0 / t1: UNA
     fecha de pasada (granulos del dia mosaicados), la de menos nubes sobre el
@@ -110,7 +113,7 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
     agranda la ventana (si ya habia una escena de una ventana menor, se
     muestra con `incompleto`). Nunca 500. NDVI: reutiliza
     `/api/v1/sentinel/tiles` (sin mascara de nubes).
-  - Presentacion Sentinel-2 (per_api_gee 2026.10.08.4): `combinacion`
+  - Presentacion Sentinel-2 (API GEE): `combinacion`
     `color_real` (B4/B3/B2) | `infrarrojo` (B8/B4/B3: rojo intenso = vegetacion
     sana, celeste/cafe = suelo o corta, negro = agua; leyenda chica en el
     comparador). Siempre `remuestreo:'bicubico'` (suaviza el borde del pixel de
@@ -143,11 +146,11 @@ NDVI Sentinel-2 (per_api_gee), uso de suelo CIREN, predios rurales CIREN
 
 | Fuente | Uso | Endpoint |
 |---|---|---|
-| per_api_gee | NDVI medio por poligono t0/t1 con mascara Cloud Score+ y cobertura limpia, teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) y Sentinel-2 color real / infrarrojo del comparador (escena mas limpia sobre el poligono, ±15/30/60 dias, bicubico, contraste local comun t0/t1, cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi`, `/v1/tiles/rgb` |
+| API GEE | NDVI medio por poligono t0/t1 con mascara Cloud Score+ y cobertura limpia, teselas NDVI t0/t1 (ventana de 15 dias; teselas cache 30 min) y Sentinel-2 color real / infrarrojo del comparador (escena mas limpia sobre el poligono, ±15/30/60 dias, bicubico, contraste local comun t0/t1, cache 30 min) | `/v1/zonal/ndvi-change`, `/v1/tiles/ndvi`, `/v1/tiles/rgb` |
 | CIREN (publico) | Poligonos de bosque de la comuna (zonas de deteccion), capa raster, leyenda, popup por punto | `USOS_DE_LA_TIERRA__CONAF/MapServer` (capa 12 = Los Rios, CONAF 2024) |
 | CIREN / IDE Minagri (publico) | Predios rurales (deslindes SII) de la comuna con rol; capa raster y popup | `IDEMINAGRI/PROPIEDADES_RURALES/MapServer` (capa 11 = Los Rios, CIREN 2018) |
-| per_api_saff | Planes de manejo de los ultimos 10 anios, filtrados por `Comuna_Predio` (cache 6 h por comuna, tramos de 1 anio) | `/v1/historico/pm` |
-| per_api_sigcra | Rodales (GeoJSON 4326) de los 5 primeros planes de la ficha (los del rol primero, luego los mas cercanos) | `/v1/bosque-co2/rodales?solicitud=` |
+| API SAFF | Planes de manejo de los ultimos 10 anios, filtrados por `Comuna_Predio` (cache 6 h por comuna, tramos de 1 anio) | `/v1/historico/pm` |
+| API SIGCRA | Rodales (GeoJSON 4326) de los 5 primeros planes de la ficha (los del rol primero, luego los mas cercanos) | `/v1/bosque-co2/rodales?solicitud=` |
 | Esri Wayback (front) | Imagen de archivo real con fecha de captura (boton «Mejorar calidad» y comparador) | `waybackconfig.json` + `identify` de metadata |
 
 Datos personales SAFF: `app/clientes/saff.py` deja solo `CAMPOS_PUBLICOS`
@@ -202,14 +205,11 @@ o hay `Nro.Resolucion` y `Super.Aprobada` > 0, con `Fec.Resolucion` <= t1
 
 - Verificar contra datos reales de SAFF los valores de `DATUM01` (formato del
   huso) y la cantidad de planes por comuna; desde el PC de desarrollo las 3
-  APIs de Forge LAB no son alcanzables.
+  APIs internas no son alcanzables.
 - La ruta de rodales de SIGCRA usada es `/v1/bosque-co2/rodales` (la que existe
-  en per_api_sigcra); `/v1/rodales` no existe.
+  en API SIGCRA); `/v1/rodales` no existe.
 - Ampliar regiones (hoy solo Panguipulli). Para comunas con > 2.500 poligonos
   por lote o capas CIREN de otras regiones revisar `ciren_layer` y tiempos.
-- `/v1/zonal/ndvi-change` es nuevo en per_api_gee (version 2026.10.08.1): debe
-  estar desplegado antes que esta version de Lemu; validar tiempos reales por
-  lote (6 lotes en Panguipulli) y ajustar `TAMANO_LOTE`/timeout si GEE corta.
 - El `en_regla` por rodal SIGCRA solo aparece tras abrir la ficha; el
   listado solo marca `en_regla` por rol.
 - Verificar con datos reales el formato de `Rol Avaluo` en SAFF (el codigo
@@ -219,31 +219,10 @@ o hay `Nro.Resolucion` y `Super.Aprobada` > 0, con `Fec.Resolucion` <= t1
 - La capa predial es CIREN 2018: predios subdivididos despues no estan.
 - Predios con rol no numerico (parques, «VP-…», «SR») solo se evaluan por
   cercania.
-- `/v1/tiles/rgb` (color real) es nuevo en per_api_gee (version
-  2026.10.08.2): desplegarlo antes que esta version de Lemu; revisar en
-  produccion si `visualize(min 0, max 3000, gamma 1.3)` deja el bosque legible.
 - El NDVI del comparador usa la ventana [fecha, fecha + 15 dias], sin mascara
   de nubes, y no informa la fecha de cada escena (el endpoint de teselas NDVI
   no la devuelve).
-- Mascara Cloud Score+ y escena mas limpia son nuevas en per_api_gee (version
-  2026.10.08.3): desplegarla antes que Lemu 2026.10.08.7. Validar en
-  produccion: tiempos de `mas_limpia` a ±60 dias (una `reduceRegion` por
-  fecha), cuantos poligonos de Panguipulli quedan en `sin_imagen_limpia` en
-  invierno y si el umbral 0,60 deja bosque en sombra como «nube».
 - Cambiar `cloud` cambia la clave de cache: la deteccion con el nuevo defecto
   (80) recalcula aunque haya un resultado con 40.
-- Probado en local (Edge headless, poligono CIREN 70150, t0 2025-10-01 / t1
-  2026-09-01): Wayback ANTES 26-02-2024 (Maxar 0,31 m) / DESPUES 01-01-2026
-  (Vantor 0,31 m); con t0 2026-07-01 ambos lados caen en 01-01-2026 y sale el
-  aviso de misma foto. Sentinel-2 color real no se pudo ver en local (GEE no
-  alcanzable).
 - Wayback: si t0, t1 y la ultima version comparten la misma captura en el
   punto, solo hay una fecha y no se puede comparar.
-- Presentacion Sentinel-2 (bicubico, contraste local, infrarrojo) es nueva en
-  per_api_gee 2026.10.08.4: desplegarla antes que Lemu 2026.10.08.9 (con una
-  per_api_gee anterior los campos nuevos se ignoran: se ve como antes y sin
-  «igual en ambos lados»). Validar en LAB: que el bosque se lea mejor con
-  percentiles 2-98 + gamma 1,1, el max de NIR (5000) del infrarrojo fijo de
-  respaldo y el tiempo extra (un `reduceRegion` de percentiles por pedido y la
-  segunda pasada: 2 pedidos mas por combinacion). Las teselas reales no se
-  pudieron ver en local (GEE no alcanzable).

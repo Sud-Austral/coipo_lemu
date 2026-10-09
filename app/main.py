@@ -1,9 +1,9 @@
 """Lemu 2.0: deteccion de cambios de cobertura forestal (corta no autorizada).
 
 Flujo: poligonos de bosque CIREN de la comuna -> NDVI Sentinel-2 medio por
-poligono t0 vs t1 (per_api_gee) -> predio CIREN (rol SII) del centroide ->
-planes de manejo del mismo rol o cercanos al centroide (per_api_saff) ->
-rodales del plan (per_api_sigcra, al abrir la ficha) -> estado del poligono.
+poligono t0 vs t1 (API GEE) -> predio CIREN (rol SII) del centroide ->
+planes de manejo del mismo rol o cercanos al centroide (API SAFF) ->
+rodales del plan (API SIGCRA, al abrir la ficha) -> estado del poligono.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _region(region: str) -> dict:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "per_lemu2.0"}
+    return {"ok": True, "app": "coipo_lemu", "service": "coipo_lemu"}
 
 
 @app.get("/ready")
@@ -52,7 +52,7 @@ async def ready():
     ok = gee_ok and sigcra_ok and saff_ok
     body = {
         "ok": ok,
-        "service": "per_lemu2.0",
+        "service": "coipo_lemu",
         "dependencias": {"gee": gee_ok, "sigcra": sigcra_ok, "saff": saff_ok},
     }
     return JSONResponse(status_code=200 if ok else 503, content=body)

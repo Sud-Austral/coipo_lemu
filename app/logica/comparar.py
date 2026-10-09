@@ -1,4 +1,4 @@
-"""Comparador antes/despues: Sentinel-2 del poligono en t0 y t1 (per_api_gee).
+"""Comparador antes/despues: Sentinel-2 del poligono en t0 y t1 (API GEE).
 
 Por cada fecha se pide /v1/tiles/rgb con la geometria del poligono CIREN,
 `escena='mas_limpia'` y `mascara='cs_plus'`: una sola fecha de pasada (mosaico
