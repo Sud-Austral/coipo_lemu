@@ -33,7 +33,7 @@ Las APIs internas (GEE, SAFF, SIGCRA) no son alcanzables desde un PC de desarrol
 ```bash
 python -m pytest tests -q
 ```
-Ejecutado el 2026-10-24: 73 pruebas OK. El `Dockerfile` corre las pruebas en una etapa `prueba` y falla el build si no pasan.
+Ejecutado el 2026-10-24 y de nuevo el 2026-11-24: 73 pruebas OK (Python 3.13 local). Trampa: sin `pytest-asyncio` instalado fallan 24 pruebas con «async def functions are not natively supported»; no es un defecto del código. El `Dockerfile` corre las pruebas en una etapa `prueba` y falla el build si no pasan.
 
 ## Despliegue
 `Dockerfile` (puerto 8080, `HEALTHCHECK` en `/health`). Ramas según AGENTS.md: `uat` = ambiente UAT, `main` = producción solo vía PR aprobado. No hay `docker-compose` ni workflows de CI en el repo; el mecanismo de despliegue no lo comprobé.

@@ -10,7 +10,7 @@ FastAPI + front estático. Detecta caída de NDVI en polígonos de bosque CIREN 
 
 ## Comandos (VERIFICADOS)
 ```bash
-python -m pytest tests -q      # 73 OK el 2026-10-24
+python -m pytest tests -q      # 73 OK el 2026-10-24 y el 2026-11-24 (Python 3.13, pytest 8.4, pytest-asyncio 0.24)
 uvicorn app.main:app --port 8080
 ```
 No hay lint ni build del front. No hay `requirements.txt`: las dependencias están fijadas en el `Dockerfile` (fastapi 0.115, uvicorn 0.32, httpx 0.27; pytest 8, pytest-asyncio 0.24 en la etapa de prueba).
@@ -29,4 +29,5 @@ No hay lint ni build del front. No hay `requirements.txt`: las dependencias est�
 - Cambiar `cloud` cambia la clave de caché (recalcula).
 - El `Dockerfile` ejecuta los tests en el build: una prueba rota rompe la imagen.
 - Ramas: `uat` = UAT, `main` = producción solo por PR aprobado.
+- Sin `pytest-asyncio` 24 de las 73 pruebas fallan ("async def functions are not natively supported"): instalarlo antes de diagnosticar nada (visto el 2026-11-24).
 - `AGENTS.md` fija umbrales (p. ej. `delta <= -0.15`, `min_ha` 1, nubes 80 %); si cambias código que los define, actualiza ese documento.
